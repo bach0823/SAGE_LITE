@@ -1,5 +1,6 @@
 <p align="center">
-  <h1 align="center"><ins>SAGE-Lite</ins><br>A Lite Version of Shape-Adapting Gated Experts: Dynamic Expert Routing for Crack Binary Segmentation</h1>
+  <h1 align="center"><ins>SAGE</ins> 🌿<br>Shape-Adapting Gated Experts for Adaptive Histopathology Image Segmentation</h1>
+  <h3 align="center">CVPR 2026 Findings Track</h3>
   <p align="center">
     <span class="author-block">
       <a href="https://orcid.org/0009-0006-6684-5323">Gia Huy Thai</a><sup>1,*</sup>

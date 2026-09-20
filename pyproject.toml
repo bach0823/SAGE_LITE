@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sage-lite"
 version = "0.1.0"
-description = "A Lite Version of Shape-Adapting Gated Experts: Dynamic Expert Routing for Crack Binary Segmentation"
+description = "SAGE-Lite: A Lite Version of Shape-Adapting Gated Experts for Crack Binary Segmentation"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
