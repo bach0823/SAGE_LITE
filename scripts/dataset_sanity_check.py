@@ -43,6 +43,9 @@ def main():
         imgs = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
         masks = [f for f in os.listdir(mask_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
         
+        if len(imgs) == 0:
+            fatal_error(f"No images found in {img_dir}. Prep script failed or directory is empty!")
+            
         img_bases = set([os.path.splitext(f)[0] for f in imgs])
         mask_bases = set([os.path.splitext(f)[0] for f in masks])
         
