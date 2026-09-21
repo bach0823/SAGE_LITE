@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import yaml
 import torch
@@ -7,6 +7,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
 from torch.utils.data import DataLoader
+
+# Add project root to sys.path for direct script execution
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import set_seed
