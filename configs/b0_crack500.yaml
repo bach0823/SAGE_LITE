@@ -1,9 +1,11 @@
 ﻿model: B0
 seed: 42
 img_size: 448
-batch_size: 20
+batch_size: 16
 num_workers: 4
-epochs: 50
+epochs: 30
+stage1_epochs: 15
+patience: 6
 lr: 1e-4
 output_dir: results/runs/B0_Crack500
 mask_suffix: ""
@@ -21,3 +23,4 @@ val:
 test:
   images: "test/images"
   masks: "test/masks"
+
