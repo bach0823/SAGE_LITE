@@ -68,7 +68,7 @@ def main(config_path):
     
     output_dir = config.get('output_dir', 'results/runs')
     os.makedirs(output_dir, exist_ok=True)
-    logger = setup_logging(output_dir, log_file_name='train.log')
+    logger = setup_logging(output_dir, experiment_name='train')
     logger.info(f"Loaded config from {config_path}")
     
     # Setup Device
@@ -202,3 +202,4 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     args = parser.parse_args()
     main(args.config)
+
