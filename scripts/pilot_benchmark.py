@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import os
 import yaml
 import torch
@@ -71,9 +71,9 @@ def main():
         torch.cuda.synchronize()
         train_start = time.time()
         
-        for images, targets in train_loader:
-            images = images.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
+        for batch in train_loader:
+            images = batch['image'].to(device, non_blocking=True)
+            targets = batch['label'].to(device, non_blocking=True)
             
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast():
@@ -101,9 +101,9 @@ def main():
         val_start = time.time()
         
         with torch.no_grad():
-            for images, targets in val_loader:
-                images = images.to(device, non_blocking=True)
-                targets = targets.to(device, non_blocking=True)
+            for batch in val_loader:
+                images = batch['image'].to(device, non_blocking=True)
+                targets = batch['label'].to(device, non_blocking=True)
                 
                 with torch.cuda.amp.autocast():
                     logits = model(images)
