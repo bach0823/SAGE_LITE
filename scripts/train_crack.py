@@ -15,7 +15,7 @@ if project_root not in sys.path:
 
 import time
 
-from sage.networks import create_b0_unet
+from sage.networks import create_b0_unet, create_b1_unet
 from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 
@@ -136,6 +136,8 @@ def main(args):
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
         model = create_b0_unet(pretrained=True).to(device)
+    elif model_type == 'B1':
+        model = create_b1_unet(pretrained=True).to(device)
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         
@@ -158,7 +160,7 @@ def main(args):
     stages_to_run = [2] if args.stage2_only else [1, 2]
     
     if args.stage2_only:
-        stage1_ckpt_path = os.path.join(output_dir, "best_model_b0_stage1.pth")
+        stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
         if os.path.exists(stage1_ckpt_path):
             logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
             # Checkpoint loading happens later, here we just resolve epochs
@@ -191,7 +193,7 @@ def main(args):
                 break
                 
         if stage == 2:
-            stage1_ckpt_path = os.path.join(output_dir, f"best_model_b0_stage1.pth")
+            stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
             if os.path.exists(stage1_ckpt_path):
                 logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
                 checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
@@ -268,7 +270,7 @@ def main(args):
                 best_stage_loss = val_loss
                 epochs_no_improve = 0
                 
-                ckpt_path = os.path.join(output_dir, f"best_model_b0_stage{stage}.pth")
+                ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage{stage}.pth")
                 torch.save({
                     'epoch': int(epoch),
                     'stage': int(stage),
@@ -288,7 +290,7 @@ def main(args):
                 if is_global_best:
                     global_best_dice = val_dice
                     global_best_loss = val_loss
-                    global_ckpt_path = os.path.join(output_dir, f"best_model_b0_global.pth")
+                    global_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_global.pth")
                     torch.save({
                         'epoch': int(epoch),
                         'stage': int(stage),

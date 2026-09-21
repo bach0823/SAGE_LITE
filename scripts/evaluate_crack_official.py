@@ -12,7 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from sage.networks import create_b0_unet
+from sage.networks import create_b0_unet, create_b1_unet
 from sage.utils.training_utils import set_seed
 from scripts.train_crack import CrackBinaryLoss
 
@@ -141,7 +141,14 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    model = create_b0_unet(pretrained=False).to(device)
+    model_type = config.get('model', 'B0')
+    if model_type == 'B0':
+        model = create_b0_unet(pretrained=False).to(device)
+    elif model_type == 'B1':
+        model = create_b1_unet(pretrained=False).to(device)
+    else:
+        raise ValueError(f"Model {model_type} not implemented yet")
+        
     print(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     if 'model_state_dict' in checkpoint:
