@@ -53,28 +53,38 @@ def get_scheduler(optimizer, epochs, warmup_epochs=3):
     )
 
 class CrackBinaryLoss(torch.nn.Module):
-    def __init__(self, pos_weight=None):
+    def __init__(self, bce_weight=1.0, dice_weight=1.5, smooth=1e-5):
         super().__init__()
-        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.smooth = smooth
+        self.bce = torch.nn.BCEWithLogitsLoss()
+
     def forward(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+        
         bce_loss = self.bce(logits, targets)
         
         probs = torch.sigmoid(logits)
-        smooth = 1e-5
         intersection = (probs * targets).sum(dim=(2, 3))
         union = probs.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
-        dice_loss = 1.0 - (2.0 * intersection + smooth) / (union + smooth)
+        dice_score = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        dice_loss = 1.0 - dice_score.mean()
         
-        return bce_loss + dice_loss.mean()
+        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
 
 def calculate_binary_metrics(probs, targets, threshold=0.5):
     preds = (probs > threshold).float()
+    if targets.dim() == 3:
+        targets = targets.unsqueeze(1)
+    targets = targets.float()
     
-    tp = (preds * targets).sum(dim=(2,3))
-    fp = (preds * (1 - targets)).sum(dim=(2,3))
-    fn = ((1 - preds) * targets).sum(dim=(2,3))
-    tn = ((1 - preds) * (1 - targets)).sum(dim=(2,3))
+    tp = (preds * targets).sum(dim=(2, 3))
+    fp = (preds * (1 - targets)).sum(dim=(2, 3))
+    fn = ((1 - preds) * targets).sum(dim=(2, 3))
+    tn = ((1 - preds) * (1 - targets)).sum(dim=(2, 3))
     
     smooth = 1e-5
     acc = (tp + tn) / (tp + tn + fp + fn + smooth)
@@ -304,4 +314,5 @@ if __name__ == '__main__':
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     args = parser.parse_args()
     main(args)
+
 
