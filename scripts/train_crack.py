@@ -1,4 +1,5 @@
-﻿import argparse
+﻿import json
+import argparse
 import os
 import sys
 import yaml
@@ -147,9 +148,20 @@ def main(args):
         stage1_ckpt_path = os.path.join(output_dir, "best_model_b0_stage1.pth")
         if os.path.exists(stage1_ckpt_path):
             logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
-            checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-            epochs_used_so_far = int(checkpoint.get('epoch', stage1_max))
-            logger.info(f"Stage 1 used {epochs_used_so_far} epochs.")
+            # Checkpoint loading happens later, here we just resolve epochs
+            if args.stage1_epochs_used is not None:
+                epochs_used_so_far = args.stage1_epochs_used
+                logger.info(f"Using explicitly provided --stage1-epochs-used: {epochs_used_so_far}")
+            else:
+                completion_file = os.path.join(output_dir, "stage1_completion.json")
+                if os.path.exists(completion_file):
+                    with open(completion_file, 'r') as f:
+                        meta = json.load(f)
+                        epochs_used_so_far = meta.get('epochs_used', stage1_max)
+                    logger.info(f"Loaded actual Stage 1 epochs from {completion_file}: {epochs_used_so_far}")
+                else:
+                    epochs_used_so_far = stage1_max
+                    logger.warning(f"No explicit stage1 epochs provided, and completion file missing. Assuming max: {epochs_used_so_far}")
         else:
             logger.error(f"Cannot find Stage 1 checkpoint at {stage1_ckpt_path}")
             sys.exit(1)
@@ -277,11 +289,19 @@ def main(args):
                 break
                 
         epochs_used_so_far += actual_epochs_this_stage
+        
+        # Save actual epochs used metadata for resuming logic
+        completion_file = os.path.join(output_dir, f"stage{stage}_completion.json")
+        with open(completion_file, 'w') as f:
+            json.dump({'epochs_used': actual_epochs_this_stage}, f)
+            
         logger.info(f"Stage {stage} finished. Total epochs used so far: {epochs_used_so_far}/{total_budget}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train SAGE-Lite Models for Crack Segmentation')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     parser.add_argument('--stage2-only', action='store_true', help='Skip Stage 1 and resume directly to Stage 2 using stage 1 checkpoint')
+    parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     args = parser.parse_args()
     main(args)
+
