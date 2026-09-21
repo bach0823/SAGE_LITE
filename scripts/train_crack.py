@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import os
 import sys
 import yaml
@@ -26,7 +26,7 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05):
             wd = weight_decay
             
         # Differential LR: backbone uses lower LR
-        if 'encoder' in name or 'convnext' in name:
+        if name.startswith('backbone'):
             lr = lr_backbone
         else:
             lr = lr_decoder
@@ -145,15 +145,27 @@ def main(config_path):
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
     
-    max_epochs = config.get('epochs', 30)
+    total_budget = config.get('epochs', 30)
+    # Ensure stage1_max does not exceed total_budget
+    stage1_max = min(config.get('stage1_epochs', total_budget // 2), total_budget)
     patience = config.get('patience', 6)
     
     global_best_dice = 0.0
     global_best_loss = float('inf')
     
+    epochs_used_so_far = 0
+    
     for stage in [1, 2]:
         logger.info(f"\n{'='*40}\nSTARTING STAGE {stage}\n{'='*40}")
         
+        if stage == 1:
+            max_stage_epochs = stage1_max
+        else:
+            max_stage_epochs = total_budget - epochs_used_so_far
+            if max_stage_epochs <= 0:
+                logger.info(f"Total epoch budget ({total_budget}) exhausted. Skipping Stage 2.")
+                break
+                
         if stage == 2:
             stage1_ckpt_path = os.path.join(output_dir, f"best_model_b0_stage1.pth")
             if os.path.exists(stage1_ckpt_path):
@@ -165,18 +177,20 @@ def main(config_path):
         
         param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
-        scheduler = get_scheduler(optimizer, epochs=max_epochs, warmup_epochs=3)
+        scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=3)
         
         best_stage_dice = 0.0
         best_stage_loss = float('inf')
         epochs_no_improve = 0
+        actual_epochs_this_stage = 0
         
-        for epoch in range(1, max_epochs + 1):
+        for epoch in range(1, max_stage_epochs + 1):
+            actual_epochs_this_stage = epoch
             model.train()
             train_loss = 0.0
             train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
             
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs} [Train]")
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{max_stage_epochs} [Train]")
             for batch in pbar:
                 images = batch['image'].to(device, non_blocking=True)
                 labels = batch['label'].to(device, non_blocking=True)
@@ -208,7 +222,7 @@ def main(config_path):
             val_acc, val_dice, val_iou = 0.0, 0.0, 0.0
             
             with torch.no_grad():
-                for batch in tqdm(val_loader, desc=f"Epoch {epoch}/{max_epochs} [Val]"):
+                for batch in tqdm(val_loader, desc=f"Epoch {epoch}/{max_stage_epochs} [Val]"):
                     images = batch['image'].to(device, non_blocking=True)
                     labels = batch['label'].to(device, non_blocking=True)
                     
@@ -228,7 +242,7 @@ def main(config_path):
             val_loss /= len(val_loader)
             val_dice /= len(val_loader)
             
-            logger.info(f"Epoch {epoch}/{max_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f}")
+            logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f}")
             
             is_best_stage = False
             if val_dice > best_stage_dice + 1e-4:
@@ -279,6 +293,9 @@ def main(config_path):
             if epochs_no_improve >= patience:
                 logger.info(f"EarlyStopping triggered at epoch {epoch} (Patience: {patience})")
                 break
+                
+        epochs_used_so_far += actual_epochs_this_stage
+        logger.info(f"Stage {stage} finished. Total epochs used so far: {epochs_used_so_far}/{total_budget}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train SAGE-Lite Models for Crack Segmentation')
