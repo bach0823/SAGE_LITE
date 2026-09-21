@@ -2,11 +2,16 @@
 import os
 import sys
 import yaml
+from tqdm import tqdm
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from timm.scheduler.cosine_lr import CosineLRScheduler
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import time
 
 from sage.networks import create_b0_unet
@@ -19,13 +24,11 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05):
         if not param.requires_grad:
             continue
             
-        # Exclude LayerNorm and bias from weight decay
         if 'LayerNorm' in name or name.endswith('.bias'):
             wd = 0.0
         else:
             wd = weight_decay
             
-        # Differential LR: backbone uses lower LR
         if name.startswith('backbone'):
             lr = lr_backbone
         else:
@@ -39,66 +42,48 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05):
     return optimizer_groups
 
 def get_scheduler(optimizer, epochs, warmup_epochs=3):
-    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-    
-    if epochs <= warmup_epochs:
-        warmup_epochs = max(1, epochs // 2)
-        
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
-    
-    scheduler = SequentialLR(
+    return CosineLRScheduler(
         optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_epochs]
+        t_initial=epochs,
+        lr_min=1e-6,
+        warmup_t=warmup_epochs,
+        warmup_lr_init=1e-6,
+        t_in_epochs=True
     )
-    return scheduler
 
-class CrackBinaryLoss(nn.Module):
-    def __init__(self, bce_weight=1.0, dice_weight=1.5, smooth=1e-5):
+class CrackBinaryLoss(torch.nn.Module):
+    def __init__(self, pos_weight=None):
         super().__init__()
-        self.bce_weight = bce_weight
-        self.dice_weight = dice_weight
-        self.smooth = smooth
-        self.bce = nn.BCEWithLogitsLoss()
-
-    def forward(self, logits, targets):
-        if targets.dim() == 3:
-            targets = targets.unsqueeze(1)
-        targets = targets.float()
+        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         
+    def forward(self, logits, targets):
         bce_loss = self.bce(logits, targets)
         
         probs = torch.sigmoid(logits)
+        smooth = 1e-5
         intersection = (probs * targets).sum(dim=(2, 3))
         union = probs.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
-        dice_score = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        dice_loss = 1.0 - dice_score.mean()
+        dice_loss = 1.0 - (2.0 * intersection + smooth) / (union + smooth)
         
-        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        return bce_loss + dice_loss.mean()
 
 def calculate_binary_metrics(probs, targets, threshold=0.5):
     preds = (probs > threshold).float()
-    if targets.dim() == 3:
-        targets = targets.unsqueeze(1)
-    targets = targets.float()
     
-    intersection = (preds * targets).sum().item()
-    union = (preds + targets).sum().item() - intersection
+    tp = (preds * targets).sum(dim=(2,3))
+    fp = (preds * (1 - targets)).sum(dim=(2,3))
+    fn = ((1 - preds) * targets).sum(dim=(2,3))
+    tn = ((1 - preds) * (1 - targets)).sum(dim=(2,3))
     
-    correct = (preds == targets).sum().item()
-    total = targets.numel()
-    acc = correct / total if total > 0 else 0
+    smooth = 1e-5
+    acc = (tp + tn) / (tp + tn + fp + fn + smooth)
+    dice = (2.0 * tp) / (2.0 * tp + fp + fn + smooth)
+    iou = tp / (tp + fp + fn + smooth)
     
-    pred_sum = preds.sum().item()
-    target_sum = targets.sum().item()
-    dice = (2.0 * intersection) / (pred_sum + target_sum + 1e-5)
-    
-    iou = intersection / (union + 1e-5)
-    
-    return acc, dice, iou
+    return acc.mean().item(), dice.mean().item(), iou.mean().item()
 
-def main(config_path):
+def main(args):
+    config_path = args.config
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
         
@@ -133,7 +118,6 @@ def main(config_path):
         pin_memory=True,
         drop_last=False
     )
-    # KhÃ´ng dÃ¹ng val_loader vÃ¬ ta dÃ¹ng Tiling Protocol
     
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
@@ -150,7 +134,6 @@ def main(config_path):
     lr_decoder = base_lr
     
     total_budget = config.get('epochs', 30)
-    # Ensure stage1_max does not exceed total_budget
     stage1_max = min(config.get('stage1_epochs', total_budget // 2), total_budget)
     patience = config.get('patience', 6)
     
@@ -158,8 +141,20 @@ def main(config_path):
     global_best_loss = float('inf')
     
     epochs_used_so_far = 0
+    stages_to_run = [2] if args.stage2_only else [1, 2]
     
-    for stage in [1, 2]:
+    if args.stage2_only:
+        stage1_ckpt_path = os.path.join(output_dir, "best_model_b0_stage1.pth")
+        if os.path.exists(stage1_ckpt_path):
+            logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
+            checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
+            epochs_used_so_far = int(checkpoint.get('epoch', stage1_max))
+            logger.info(f"Stage 1 used {epochs_used_so_far} epochs.")
+        else:
+            logger.error(f"Cannot find Stage 1 checkpoint at {stage1_ckpt_path}")
+            sys.exit(1)
+    
+    for stage in stages_to_run:
         logger.info(f"\n{'='*40}\nSTARTING STAGE {stage}\n{'='*40}")
         
         if stage == 1:
@@ -174,7 +169,7 @@ def main(config_path):
             stage1_ckpt_path = os.path.join(output_dir, f"best_model_b0_stage1.pth")
             if os.path.exists(stage1_ckpt_path):
                 logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
-                checkpoint = torch.load(stage1_ckpt_path, map_location=device)
+                checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
@@ -247,12 +242,11 @@ def main(config_path):
                 
                 ckpt_path = os.path.join(output_dir, f"best_model_b0_stage{stage}.pth")
                 torch.save({
-                    'epoch': epoch,
-                    'stage': stage,
+                    'epoch': int(epoch),
+                    'stage': int(stage),
                     'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'best_dice': best_stage_dice,
-                    'best_loss': best_stage_loss,
+                    'best_dice': float(best_stage_dice),
+                    'best_loss': float(best_stage_loss),
                 }, ckpt_path)
                 logger.info(f"New best Stage {stage} model saved with Val Dice: {best_stage_dice:.4f} and Val Loss: {best_stage_loss:.4f}")
                 
@@ -268,12 +262,11 @@ def main(config_path):
                     global_best_loss = val_loss
                     global_ckpt_path = os.path.join(output_dir, f"best_model_b0_global.pth")
                     torch.save({
-                        'epoch': epoch,
-                        'stage': stage,
+                        'epoch': int(epoch),
+                        'stage': int(stage),
                         'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'best_dice': global_best_dice,
-                        'best_loss': global_best_loss,
+                        'best_dice': float(global_best_dice),
+                        'best_loss': float(global_best_loss),
                     }, global_ckpt_path)
                     logger.info(f"*** New GLOBAL best model saved (Dice: {global_best_dice:.4f}) ***")
             else:
@@ -289,9 +282,6 @@ def main(config_path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train SAGE-Lite Models for Crack Segmentation')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
+    parser.add_argument('--stage2-only', action='store_true', help='Skip Stage 1 and resume directly to Stage 2 using stage 1 checkpoint')
     args = parser.parse_args()
-    main(args.config)
-
-
-
-
+    main(args)
