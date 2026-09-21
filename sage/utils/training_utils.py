@@ -44,6 +44,7 @@ def setup_logging(output_dir, experiment_name="experiment"):
     root_logger.addHandler(console_handler)
     
     logging.info(f"Logging initialized. Log file: {log_file_path}")
+    return root_logger
 
 
 def set_seed(seed=42):
