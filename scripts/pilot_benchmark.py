@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import os
 import sys
 import yaml
@@ -29,7 +29,7 @@ def main():
     print(f"Starting Real-Data Pilot on {device}...")
     
     img_size = config.get('img_size', 448)
-    batch_size = 20
+    batch_size = 16
     num_workers = config.get('num_workers', 4)
     
     print("Loading datasets (Crack500 with real dataloader)...")
@@ -56,7 +56,7 @@ def main():
     model = create_b0_unet(pretrained=True).to(device)
     criterion = CrackBinaryLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     epochs = 3
     
@@ -82,7 +82,7 @@ def main():
             targets = batch['label'].to(device, non_blocking=True)
             
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 logits = model(images)
                 loss = criterion(logits, targets)
             scaler.scale(loss).backward()
@@ -111,7 +111,7 @@ def main():
                 images = batch['image'].to(device, non_blocking=True)
                 targets = batch['label'].to(device, non_blocking=True)
                 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     logits = model(images)
                     loss = criterion(logits, targets)
                     
@@ -170,3 +170,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
