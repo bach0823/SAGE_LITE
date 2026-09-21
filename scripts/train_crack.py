@@ -117,7 +117,7 @@ def main(config_path):
     num_workers = config.get('num_workers', 4)
     
     train_dataset = get_dataset_from_config(config_path, split='train', image_size=img_size)
-    from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
+    from evaluate_crack_official import get_image_mask_pairs, evaluate_split
     val_pairs = get_image_mask_pairs(config, 'val')
     
     g = torch.Generator()
@@ -291,6 +291,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     args = parser.parse_args()
     main(args.config)
+
 
 
 

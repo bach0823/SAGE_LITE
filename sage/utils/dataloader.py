@@ -20,12 +20,12 @@ def get_transformations(img_size, crop_mode='random'):
     """
     if crop_mode == 'random':
         base_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, mask_value=0),
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
             A.RandomCrop(width=img_size, height=img_size)
         ]
     else:
         base_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
             A.Resize(img_size, img_size)
         ]
 
@@ -43,7 +43,7 @@ def get_transformations(img_size, crop_mode='random'):
     ])
     
     val_transforms = A.Compose([
-        A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, mask_value=0),
+        A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])
@@ -334,6 +334,7 @@ class ConfigurableMedicalDataset(Dataset):
 def get_dataset_from_config(config_path, split='train', image_size=512):
     """Helper to create dataset directly from yaml path"""
     return ConfigurableMedicalDataset(config_path, split=split, image_size=image_size)
+
 
 
 
