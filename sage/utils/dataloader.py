@@ -1,4 +1,4 @@
-import os
+﻿import os
 import random
 import numpy as np
 import torch
@@ -14,13 +14,22 @@ import logging
 Image.MAX_IMAGE_PIXELS = None 
 
 
-def get_transformations(img_size):
+def get_transformations(img_size, crop_mode='random'):
     """
     Get data augmentation transformations for training and validation
     """
+    if crop_mode == 'random':
+        base_crop = [
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, mask_value=0),
+            A.RandomCrop(width=img_size, height=img_size)
+        ]
+    else:
+        base_crop = [
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+            A.Resize(img_size, img_size)
+        ]
 
-    train_transform = A.Compose([
-        A.Resize(img_size, img_size),
+    train_transform = A.Compose(base_crop + [
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
@@ -34,7 +43,7 @@ def get_transformations(img_size):
     ])
     
     val_transforms = A.Compose([
-        A.Resize(img_size, img_size),
+        A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, mask_value=0),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])
@@ -255,7 +264,8 @@ class ConfigurableMedicalDataset(Dataset):
             self.transforms = transform
         else:
             # Default transforms
-            train_t, val_t = get_transformations(image_size)
+            crop_mode = self.config.get('crop_mode', 'random')
+            train_t, val_t = get_transformations(image_size, crop_mode=crop_mode)
             self.transforms = train_t if split == 'train' else val_t
 
     def __len__(self):
@@ -274,8 +284,37 @@ class ConfigurableMedicalDataset(Dataset):
         # Force binary mask (0/1) to avoid label out-of-range in CE loss
         mask = (mask > 0).astype(np.uint8)
         
-        # Apply Transforms
-        if self.transforms:
+        # Apply Transforms with Smart Filtering for Training (Crack500 Protocol)
+        if self.split == 'train' and self.transforms:
+            # Target distribution: ~85% positive patches (contain cracks), ~15% pure negative
+            import random
+            is_positive_target = random.random() < 0.85
+            
+            best_aug = None
+            best_fg = -1 if is_positive_target else float('inf')
+            
+            for _ in range(10): # try up to 10 times to find a matching patch
+                augmented = self.transforms(image=image, mask=mask)
+                fg_pixels = (augmented['mask'] > 0).sum()
+                has_crack = fg_pixels >= 20
+                
+                # Update best candidate
+                if is_positive_target and fg_pixels > best_fg:
+                    best_fg = fg_pixels
+                    best_aug = augmented
+                elif not is_positive_target and fg_pixels < best_fg:
+                    best_fg = fg_pixels
+                    best_aug = augmented
+                
+                # Early break if target satisfied
+                if is_positive_target and has_crack:
+                    break
+                elif not is_positive_target and not has_crack:
+                    break
+                    
+            image = best_aug['image']
+            label = best_aug['mask']
+        elif self.transforms:
             augmented = self.transforms(image=image, mask=mask)
             image = augmented['image']
             label = augmented['mask']
@@ -295,3 +334,10 @@ class ConfigurableMedicalDataset(Dataset):
 def get_dataset_from_config(config_path, split='train', image_size=512):
     """Helper to create dataset directly from yaml path"""
     return ConfigurableMedicalDataset(config_path, split=split, image_size=image_size)
+
+
+
+
+
+
+

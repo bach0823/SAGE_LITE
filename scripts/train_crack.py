@@ -117,19 +117,23 @@ def main(config_path):
     num_workers = config.get('num_workers', 4)
     
     train_dataset = get_dataset_from_config(config_path, split='train', image_size=img_size)
-    val_dataset = get_dataset_from_config(config_path, split='val', image_size=img_size)
+    from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
+    val_pairs = get_image_mask_pairs(config, 'val')
     
     g = torch.Generator()
     g.manual_seed(config.get('seed', 42))
     
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker, generator=g
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=num_workers,
+        worker_init_fn=seed_worker,
+        generator=g,
+        pin_memory=True,
+        drop_last=False
     )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True
-    )
+    # KhÃ´ng dÃ¹ng val_loader vÃ¬ ta dÃ¹ng Tiling Protocol
     
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
@@ -218,29 +222,14 @@ def main(config_path):
             scheduler.step()
             
             model.eval()
-            val_loss = 0.0
-            val_acc, val_dice, val_iou = 0.0, 0.0, 0.0
-            
             with torch.no_grad():
-                for batch in tqdm(val_loader, desc=f"Epoch {epoch}/{max_stage_epochs} [Val]"):
-                    images = batch['image'].to(device, non_blocking=True)
-                    labels = batch['label'].to(device, non_blocking=True)
-                    
-                    with torch.amp.autocast('cuda'):
-                        logits = model(images)
-                        loss = criterion(logits, labels)
-                        
-                    val_loss += loss.item()
-                    probs = torch.sigmoid(logits)
-                    acc, dice, iou = calculate_binary_metrics(probs, labels)
-                    val_acc += acc
-                    val_dice += dice
-                    val_iou += iou
-                    
+                val_metrics = evaluate_split(model, val_pairs, device, tile_size=img_size, criterion=criterion, verbose=False)
+                
+            val_loss = val_metrics['loss']
+            val_dice = val_metrics['dice']
+            
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
-            val_loss /= len(val_loader)
-            val_dice /= len(val_loader)
             
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f}")
             
@@ -302,3 +291,6 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     args = parser.parse_args()
     main(args.config)
+
+
+

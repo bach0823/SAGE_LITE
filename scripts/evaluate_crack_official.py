@@ -14,6 +14,7 @@ if project_root not in sys.path:
 
 from sage.networks import create_b0_unet
 from sage.utils.training_utils import set_seed
+from scripts.train_crack import CrackBinaryLoss
 
 def get_image_mask_pairs(config, split):
     root_dir = config.get('root_dir', '')
@@ -31,7 +32,6 @@ def get_image_mask_pairs(config, split):
         
     img_paths = sorted(glob.glob(os.path.join(img_dir, '*')))
     
-    # Filter valid extensions
     valid_exts = {'.jpg', '.jpeg', '.png', '.bmp'}
     img_paths = [p for p in img_paths if os.path.splitext(p)[1].lower() in valid_exts]
     
@@ -39,8 +39,6 @@ def get_image_mask_pairs(config, split):
     mask_suffix = config.get('mask_suffix', '')
     for img_p in img_paths:
         stem = os.path.splitext(os.path.basename(img_p))[0]
-        # In Crack500, masks are usually exactly the same name or have a suffix, and typically .png
-        # Try to find corresponding mask
         found_mask = None
         for ext in ['.png', '.jpg', '.jpeg', '.bmp']:
             test_mask = os.path.join(mask_dir, stem + mask_suffix + ext)
@@ -55,46 +53,49 @@ def get_image_mask_pairs(config, split):
 def predict_full_image_tiling(model, image, device, tile_size=448, batch_size=16):
     H, W = image.shape[:2]
     
-    # Calculate padding
     pad_h = (tile_size - (H % tile_size)) % tile_size
     pad_w = (tile_size - (W % tile_size)) % tile_size
     
     padded_img = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
     pH, pW = padded_img.shape[:2]
     
-    # Extract patches
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    
     patches = []
     coords = []
     for y in range(0, pH, tile_size):
         for x in range(0, pW, tile_size):
             patch = padded_img[y:y+tile_size, x:x+tile_size]
-            # Normalize exactly like training: ToTensor + div 255 (Albumentations default for ToTensorV2)
             patch_tensor = torch.from_numpy(patch).permute(2, 0, 1).float() / 255.0
+            patch_tensor = (patch_tensor - mean) / std
             patches.append(patch_tensor)
             coords.append((y, x))
             
-    # Predict in batches
-    pred_mask = np.zeros((pH, pW), dtype=np.float32)
+    pred_logits = np.zeros((pH, pW), dtype=np.float32)
     
     for i in range(0, len(patches), batch_size):
         batch = torch.stack(patches[i:i+batch_size]).to(device, non_blocking=True)
         with torch.no_grad():
             with torch.amp.autocast('cuda'):
                 logits = model(batch)
-            probs = torch.sigmoid(logits).squeeze(1).cpu().numpy()
+            logits_np = logits.squeeze(1).cpu().numpy()
             
-        for j, prob in enumerate(probs):
+        for j, logit in enumerate(logits_np):
             y, x = coords[i+j]
-            pred_mask[y:y+tile_size, x:x+tile_size] = prob
+            pred_logits[y:y+tile_size, x:x+tile_size] = logit
             
-    # Crop to original size
-    pred_mask = pred_mask[:H, :W]
-    return (pred_mask > 0.5).astype(np.uint8)
+    pred_logits = pred_logits[:H, :W]
+    return pred_logits
 
-def evaluate_split(model, pairs, device, tile_size=448):
+def evaluate_split(model, pairs, device, tile_size=448, criterion=None, verbose=True):
     metrics = {'precision': [], 'recall': [], 'dice': [], 'iou': []}
+    if criterion is not None:
+        metrics['loss'] = []
+        
+    iterator = tqdm(pairs, desc="Evaluating") if verbose else pairs
     
-    for img_p, mask_p in tqdm(pairs, desc="Evaluating"):
+    for img_p, mask_p in iterator:
         img = cv2.imread(img_p)
         if img is None: continue
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -103,7 +104,14 @@ def evaluate_split(model, pairs, device, tile_size=448):
         if mask is None: continue
         target = (mask > 0).astype(np.uint8)
         
-        pred = predict_full_image_tiling(model, img, device, tile_size=tile_size)
+        logits_np = predict_full_image_tiling(model, img, device, tile_size=tile_size)
+        pred = (logits_np > 0.0).astype(np.uint8)
+        
+        if criterion is not None:
+            log_tensor = torch.from_numpy(logits_np).unsqueeze(0).unsqueeze(0).to(device)
+            tgt_tensor = torch.from_numpy(target).unsqueeze(0).unsqueeze(0).float().to(device)
+            loss = criterion(log_tensor, tgt_tensor).item()
+            metrics['loss'].append(loss)
         
         tp = np.sum((pred == 1) & (target == 1))
         fp = np.sum((pred == 1) & (target == 0))
@@ -145,14 +153,17 @@ def main():
     tile_size = config.get('img_size', 448)
     print(f"Using non-overlapping tiling with tile_size={tile_size}x{tile_size}")
     
+    criterion = CrackBinaryLoss()
+    
     for split in ['val', 'test']:
         pairs = get_image_mask_pairs(config, split)
         if not pairs:
             continue
             
         print(f"\n--- Evaluating Official Protocol on {split.upper()} Set ({len(pairs)} images) ---")
-        res = evaluate_split(model, pairs, device, tile_size=tile_size)
+        res = evaluate_split(model, pairs, device, tile_size=tile_size, criterion=criterion)
         
+        print(f"{split.upper()} Loss:      {res['loss']:.4f}")
         print(f"{split.upper()} Precision: {res['precision']:.4f}")
         print(f"{split.upper()} Recall:    {res['recall']:.4f}")
         print(f"{split.upper()} Dice/F1:   {res['dice']:.4f}")
@@ -160,3 +171,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
