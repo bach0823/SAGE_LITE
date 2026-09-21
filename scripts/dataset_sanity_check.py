@@ -132,8 +132,9 @@ def main():
     # [F] DATASET PIPELINE
     # ---------------------------------------------------------
     print("\nChecking Dataset Pipeline (Configs & Dataloaders)...")
+    img_size = config.get('image_size', 448)
     for sp in splits:
-        ds = get_dataset_from_config(config_path, split=sp)
+        ds = get_dataset_from_config(config_path, split=sp, image_size=img_size)
         loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=2)
         
         batch_count = 0
@@ -141,8 +142,8 @@ def main():
             images = batch['image']
             labels = batch['label']
             
-            if images.shape[2:] != (448, 448):
-                fatal_error(f"Pipeline output image shape mismatch. Expected (..., 448, 448), got {images.shape}")
+            if images.shape[2:] != (img_size, img_size):
+                fatal_error(f"Pipeline output image shape mismatch. Expected (..., {img_size}, {img_size}), got {images.shape}")
                 
             if torch.isnan(images).any() or torch.isinf(images).any():
                 fatal_error(f"NaN/Inf detected in images for split {sp}")
@@ -159,7 +160,7 @@ def main():
     # [G] VISUAL CHECK
     # ---------------------------------------------------------
     print("\nGenerating Visual Overlays from PIPELINE output...")
-    ds_vis = get_dataset_from_config(config_path, split='train')
+    ds_vis = get_dataset_from_config(config_path, split='train', image_size=img_size)
     
     num_vis = 5
     fig, axes = plt.subplots(num_vis, 3, figsize=(12, 4*num_vis))
