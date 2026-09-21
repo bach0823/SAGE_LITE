@@ -1,0 +1,23 @@
+﻿model: B0
+seed: 42
+img_size: 448
+batch_size: 20
+num_workers: 4
+epochs: 50
+lr: 1e-4
+output_dir: results/runs/B0_Crack500
+mask_suffix: ""
+
+root_dir: "/content/dataset/Crack500"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"
