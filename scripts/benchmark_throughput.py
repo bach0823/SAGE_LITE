@@ -6,17 +6,14 @@ from sage.networks import create_b0_unet
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Starting T4 Pure Compute Throughput Sweep on {device}...")
+    
     if device.type == 'cuda':
         gpu_name = torch.cuda.get_device_name(0)
     else:
         gpu_name = "CPU"
 
-    model = create_b0_unet().to(device)
-    model.train()
-    criterion = torch.nn.BCEWithLogitsLoss()
-    img_size = 448
-
     batch_sizes = [16, 20, 24, 28]
+    img_size = 448
     results = []
 
     print("\nStarting Batch Size Sweep...")
@@ -29,6 +26,10 @@ def main():
             torch.cuda.empty_cache()
         gc.collect()
 
+        # Tạo model/optimizer/scaler SẠCH RIÊNG cho mỗi batch size
+        model = create_b0_unet().to(device)
+        model.train()
+        criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         scaler = torch.cuda.amp.GradScaler()
 
@@ -96,8 +97,9 @@ def main():
                 raise e
         finally:
             # Cleanup iteration
-            optimizer.zero_grad(set_to_none=True)
-            del images, labels, logits, loss, optimizer, scaler
+            if optimizer is not None:
+                optimizer.zero_grad(set_to_none=True)
+            del images, labels, logits, loss, optimizer, scaler, criterion, model
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
             gc.collect()
@@ -110,8 +112,8 @@ def main():
     print("> *Note: Pure GPU compute (Forward+Backward) using synthetic tensors, BCE-only.*")
     print(f"- **GPU:** {gpu_name}")
     print(f"- **Image Size:** {img_size}x{img_size}")
-    print("\n| Batch Size | Time/Step | Throughput (img/s) | Peak VRAM | Status |")
-    print("|---|---|---|---|---|")
+    print("\n| Batch | Time/step | Throughput | Peak VRAM | Status |")
+    print("|----:|--------:|---------:|--------:|:----:|")
     for res in results:
         print(f"| {res['BS']} | {res['Time/Step']} | {res['Throughput']} | {res['VRAM']} | {res['Status']} |")
     print("="*50)
