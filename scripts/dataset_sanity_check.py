@@ -132,7 +132,7 @@ def main():
     # [F] DATASET PIPELINE
     # ---------------------------------------------------------
     print("\nChecking Dataset Pipeline (Configs & Dataloaders)...")
-    img_size = config.get('img_size', 448)
+    img_size = cfg.get('img_size', 448)
     for sp in splits:
         ds = get_dataset_from_config(config_path, split=sp, image_size=img_size)
         loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=2)
