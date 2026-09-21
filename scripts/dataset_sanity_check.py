@@ -168,17 +168,29 @@ def main():
     ds_vis = get_dataset_from_config(config_path, split='train', image_size=img_size)
     
     num_vis = 5
-    fig, axes = plt.subplots(num_vis, 3, figsize=(12, 4*num_vis))
+    fig, axes = plt.subplots(num_vis, 5, figsize=(20, 4*num_vis))
     
-    # Pick 5 random indices
+    # Pick 5 random indices (or sequential for stable debugging)
     indices = np.random.choice(len(ds_vis), num_vis, replace=False)
     for i, idx in enumerate(indices):
+        # 1. Raw Loading
+        raw_info = ds_vis.samples[idx]
+        raw_img_path = raw_info['image']
+        raw_mask_path = raw_info['label']
+        
+        raw_img = cv2.imread(raw_img_path)
+        raw_img = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
+        
+        raw_mask = cv2.imread(raw_mask_path, cv2.IMREAD_GRAYSCALE)
+        raw_mask = (raw_mask > 0).astype(np.uint8)
+        
+        # 2. Processed Loading (from Pipeline)
         item = ds_vis[idx]
         img_tensor = item['image']
         mask_tensor = item['label']
         name = item.get('case_name', f"Sample {idx}")
         
-        # Robust min-max scaling for visualization regardless of normalization scheme
+        # Normalize Processed Image for visualization
         img_np = img_tensor.permute(1, 2, 0).numpy()
         img_min, img_max = img_np.min(), img_np.max()
         if img_max > img_min:
@@ -187,20 +199,32 @@ def main():
         
         mask_np = mask_tensor.squeeze().numpy()
         
-        axes[i, 0].imshow(img_np)
-        axes[i, 0].set_title(f"Processed Image: {name}")
+        # [Col 0] Raw Image
+        axes[i, 0].imshow(raw_img)
+        axes[i, 0].set_title(f"Raw Image: {name}")
         axes[i, 0].axis('off')
         
-        axes[i, 1].imshow(mask_np, cmap='gray')
-        axes[i, 1].set_title("Processed Mask")
+        # [Col 1] Raw Mask
+        axes[i, 1].imshow(raw_mask, cmap='gray')
+        axes[i, 1].set_title("Raw Mask")
         axes[i, 1].axis('off')
         
-        overlay = img_np.copy()
-        # Overlay red tint where mask indicates foreground
-        overlay[mask_np > 0.5] = [1.0, 0.0, 0.0]
-        axes[i, 2].imshow(overlay)
-        axes[i, 2].set_title("Overlay")
+        # [Col 2] Processed Image
+        axes[i, 2].imshow(img_np)
+        axes[i, 2].set_title("Processed Image")
         axes[i, 2].axis('off')
+        
+        # [Col 3] Processed Mask
+        axes[i, 3].imshow(mask_np, cmap='gray')
+        axes[i, 3].set_title("Processed Mask")
+        axes[i, 3].axis('off')
+        
+        # [Col 4] Processed Overlay
+        overlay = img_np.copy()
+        overlay[mask_np > 0.5] = [1.0, 0.0, 0.0]
+        axes[i, 4].imshow(overlay)
+        axes[i, 4].set_title("Processed Overlay")
+        axes[i, 4].axis('off')
         
     plt.tight_layout()
     out_path = "results/dataset_sanity_check.png"
@@ -225,3 +249,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
