@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import yaml
 import torch
 import torch.nn as nn
@@ -7,6 +8,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import time
 import gc
+
+# Add project root to sys.path so it can find sage and scripts modules
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from sage.networks import create_b0_unet
 from sage.utils.dataloader import get_dataset_from_config
