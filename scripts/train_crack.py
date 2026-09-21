@@ -236,7 +236,7 @@ def main(args):
                     
                 pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}"})
                 
-            scheduler.step()
+            scheduler.step(epoch)
             
             model.eval()
             with torch.no_grad():
@@ -248,7 +248,10 @@ def main(args):
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
             
-            logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f}")
+            # Log current LRs to verify differential scaling
+            bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('lr', 0) < lr_decoder * 0.5), 0.0)
+            dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('lr', 0) >= lr_decoder * 0.5), 0.0)
+            logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
             
             is_best_stage = False
             if val_dice > best_stage_dice + 1e-4:
@@ -314,5 +317,6 @@ if __name__ == '__main__':
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     args = parser.parse_args()
     main(args)
+
 
 
