@@ -32,13 +32,16 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05):
             
         if name.startswith('backbone'):
             lr = lr_backbone
+            group_name = 'backbone'
         else:
             lr = lr_decoder
+            group_name = 'decoder'
             
         optimizer_groups.append({
             'params': [param],
             'weight_decay': wd,
-            'lr': lr
+            'lr': lr,
+            'name': group_name
         })
     return optimizer_groups
 
@@ -249,8 +252,8 @@ def main(args):
             train_dice /= len(train_loader)
             
             # Log current LRs to verify differential scaling
-            bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('lr', 0) < lr_decoder * 0.5), 0.0)
-            dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('lr', 0) >= lr_decoder * 0.5), 0.0)
+            bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
+            dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
             
             is_best_stage = False
@@ -317,6 +320,7 @@ if __name__ == '__main__':
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     args = parser.parse_args()
     main(args)
+
 
 
 
