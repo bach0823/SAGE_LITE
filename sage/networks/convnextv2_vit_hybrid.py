@@ -58,6 +58,7 @@ class ConvNeXtV2ViTHybrid(nn.Module):
         img_size: int = DEFAULT_IMG_SIZE,
         convnext_model_name: str = "convnextv2_femto.fcmae",
         vit_model_name: str = "vit_tiny_patch16_224",
+        num_transformer_layers: int = NUM_TRANSFORMER_BLOCKS,
         freeze_encoder: bool = False,
         freeze_transformer: bool = False,
         pretrained: bool = True,
@@ -65,7 +66,7 @@ class ConvNeXtV2ViTHybrid(nn.Module):
         super().__init__()
 
         self.img_size = img_size
-        self.num_transformer_layers = NUM_TRANSFORMER_BLOCKS  # Hard-locked to 6 blocks
+        self.num_transformer_layers = num_transformer_layers
 
         # ====================================================================
         # 1. ENCODER: ConvNeXt-V2 Femto Backbone
@@ -106,7 +107,7 @@ class ConvNeXtV2ViTHybrid(nn.Module):
             logger.info("ConvNeXt encoder parameters frozen")
 
         # ====================================================================
-        # 2. BOTTLENECK: ViT-Tiny (Hard-locked: first 6 blocks)
+        # 2. BOTTLENECK: ViT-Tiny (Configurable blocks, default=6)
         # ====================================================================
         logger.info(f"Loading ViT-Tiny: {vit_model_name} (pretrained={pretrained})")
         vit_full = timm.create_model(vit_model_name, pretrained=pretrained)
@@ -118,11 +119,14 @@ class ConvNeXtV2ViTHybrid(nn.Module):
             raise AttributeError(f"Cannot find 'blocks' in {vit_model_name}")
 
         all_blocks = vit_full.blocks
-        # Slice exactly 6 blocks, preserving pretrained ImageNet weights
+        assert 1 <= self.num_transformer_layers <= len(all_blocks), (
+            f"Requested {self.num_transformer_layers} blocks, but {vit_model_name} only has {len(all_blocks)} blocks"
+        )
+        # Slice exactly num_transformer_layers blocks, preserving pretrained ImageNet weights
         self.transformer_blocks = nn.ModuleList([
-            all_blocks[i] for i in range(NUM_TRANSFORMER_BLOCKS)
+            all_blocks[i] for i in range(self.num_transformer_layers)
         ])
-        logger.info(f"Hard-locked {len(self.transformer_blocks)} ViT blocks (embed_dim={self.transformer_dim})")
+        logger.info(f"Configured {len(self.transformer_blocks)} ViT blocks (embed_dim={self.transformer_dim})")
 
         # ====================================================================
         # Explicit CLS Token Handling & Positional Embedding Separation
@@ -325,6 +329,7 @@ class ConvNeXtV2ViTHybrid(nn.Module):
 
 def create_convnextv2_vit_hybrid(
     img_size: int = DEFAULT_IMG_SIZE,
+    num_transformer_layers: int = NUM_TRANSFORMER_BLOCKS,
     freeze_encoder: bool = False,
     freeze_transformer: bool = False,
     pretrained: bool = True,
@@ -336,6 +341,7 @@ def create_convnextv2_vit_hybrid(
         img_size=img_size,
         convnext_model_name="convnextv2_femto.fcmae",
         vit_model_name="vit_tiny_patch16_224",
+        num_transformer_layers=num_transformer_layers,
         freeze_encoder=freeze_encoder,
         freeze_transformer=freeze_transformer,
         pretrained=pretrained,

@@ -139,7 +139,9 @@ def main(args):
     if model_type == 'B0':
         model = create_b0_unet(pretrained=True).to(device)
     elif model_type == 'B1':
-        model = create_b1_unet(pretrained=True).to(device)
+        vit_depth = int(config.get('num_transformer_layers', 6))
+        model = create_b1_unet(num_transformer_layers=vit_depth, pretrained=True).to(device)
+        logger.info(f"Loaded B1 with {vit_depth} ViT blocks")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         

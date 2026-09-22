@@ -47,6 +47,7 @@ class B1ConvNeXtViTUNet(nn.Module):
         self,
         num_classes: int = 1,
         img_size: int = 448,
+        num_transformer_layers: int = 6,
         freeze_encoder: bool = False,
         freeze_transformer: bool = False,
         use_dwsc: bool = False,
@@ -55,12 +56,14 @@ class B1ConvNeXtViTUNet(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
+        self.num_transformer_layers = num_transformer_layers
 
-        # 1. SK2 Backbone: ConvNeXt-Femto + 6 ViT-Tiny blocks (hard-locked)
+        # 1. SK2 Backbone: ConvNeXt-Femto + ViT-Tiny blocks (configurable depth, default 6)
         self.backbone = ConvNeXtV2ViTHybrid(
             img_size=img_size,
             convnext_model_name="convnextv2_femto.fcmae",
             vit_model_name="vit_tiny_patch16_224",
+            num_transformer_layers=num_transformer_layers,
             freeze_encoder=freeze_encoder,
             freeze_transformer=freeze_transformer,
             pretrained=pretrained,
@@ -116,6 +119,7 @@ class B1ConvNeXtViTUNet(nn.Module):
             "trainable_parameters": trainable_params,
             "num_classes": self.num_classes,
             "img_size": self.img_size,
+            "num_transformer_layers": self.num_transformer_layers,
             "num_shared_experts": self.num_sage_experts,
         }
 
@@ -123,6 +127,7 @@ class B1ConvNeXtViTUNet(nn.Module):
 def create_b1_unet(
     num_classes: int = 1,
     img_size: int = 448,
+    num_transformer_layers: int = 6,
     freeze_encoder: bool = False,
     freeze_transformer: bool = False,
     use_dwsc: bool = False,
@@ -134,6 +139,7 @@ def create_b1_unet(
     return B1ConvNeXtViTUNet(
         num_classes=num_classes,
         img_size=img_size,
+        num_transformer_layers=num_transformer_layers,
         freeze_encoder=freeze_encoder,
         freeze_transformer=freeze_transformer,
         use_dwsc=use_dwsc,
