@@ -17,6 +17,7 @@ Exits with code 1 on any failure.
 
 import os
 import sys
+import math
 import random
 import numpy as np
 import torch
@@ -30,7 +31,7 @@ from sage.utils.dataloader import ConfigurableMedicalDataset
 CONFIG_PATH  = "configs/b0_crack500.yaml"
 IMAGE_SIZE   = 448
 BATCH_SIZE   = 16
-N_BATCHES    = 200   # ~3200 samples
+N_BATCHES    = 200   # Max batches to test
 SEED         = 42
 # ──────────────────────────────────────────────────────────────
 
@@ -58,8 +59,12 @@ def run_smoke(num_workers: int) -> bool:
         print(f"ERROR loading dataset: {e}")
         return False
 
-    print(f"Dataset size  : {len(ds)} samples")
-    print(f"Smart filter  : {ds.use_smart_filter}  (fg_pixels >= 20 required)")
+    expected_batches = math.ceil(len(ds) / BATCH_SIZE)
+    target_batches = min(N_BATCHES, expected_batches)
+
+    print(f"Dataset size    : {len(ds)} samples")
+    print(f"Expected batches: {expected_batches} (target test: {target_batches})")
+    print(f"Smart filter    : {ds.use_smart_filter}  (fg_pixels >= 20 required)")
 
     g = torch.Generator()
     g.manual_seed(SEED)
@@ -81,7 +86,7 @@ def run_smoke(num_workers: int) -> bool:
 
     try:
         for batch_idx, batch in enumerate(
-            tqdm(dl, total=N_BATCHES, desc=f"workers={num_workers}"), start=1
+            tqdm(dl, total=target_batches, desc=f"workers={num_workers}"), start=1
         ):
             images = batch["image"]   # (B, 3, H, W)
             labels = batch["label"]   # (B, H, W)
@@ -103,7 +108,7 @@ def run_smoke(num_workers: int) -> bool:
                         )
 
             passed_batches += 1
-            if batch_idx >= N_BATCHES:
+            if batch_idx >= target_batches:
                 break
 
     except RuntimeError as e:
@@ -112,7 +117,7 @@ def run_smoke(num_workers: int) -> bool:
         import traceback; traceback.print_exc()
 
     print(f"\n--- RESULTS (num_workers={num_workers}) ---")
-    print(f"Batches passed    : {passed_batches} / {N_BATCHES}")
+    print(f"Batches passed    : {passed_batches} / {target_batches}")
     print(f"RuntimeErrors     : {runtime_errors}")
     print(f"Shape failures    : {len(shape_failures)}")
     print(f"Label failures    : {len(label_failures)}")
@@ -125,7 +130,7 @@ def run_smoke(num_workers: int) -> bool:
     ok = (runtime_errors == 0 and
           len(shape_failures) == 0 and
           len(label_failures) == 0 and
-          passed_batches >= N_BATCHES)
+          passed_batches >= target_batches)
 
     print(f"\n{'PASS' if ok else 'FAIL'} — num_workers={num_workers}")
     return ok
