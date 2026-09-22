@@ -1,0 +1,27 @@
+model: B1
+seed: 42
+img_size: 448
+batch_size: 16
+num_workers: 4
+epochs: 30
+stage1_epochs: 15
+patience: 6
+lr: 1e-4
+output_dir: "/content/drive/MyDrive/crack_seg/B1_DeepCrack_Run1"
+mask_suffix: ""
+
+root_dir: "/content/dataset/DeepCrack"
+crop_mode: "resize"
+smart_filter: false
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"
