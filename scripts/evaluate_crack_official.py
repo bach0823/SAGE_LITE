@@ -50,34 +50,56 @@ def get_image_mask_pairs(config, split):
             
     return pairs
 
-def predict_full_image_direct(model, image, device):
+from sage.utils.advanced_metrics import calculate_hd95_bf1
+
+def compute_boundary_iou(pred: np.ndarray, target: np.ndarray, d: int = 2) -> float:
     """
-    Direct full-image prediction without tiling (Protocol for DeepCrack).
-    Pads image to multiple of 32 if needed (for encoder stride),
-    runs forward pass, and crops back to original (H, W).
+    Computes Boundary IoU (Cheng et al., 2021) with boundary dilation radius d.
+    """
+    if np.sum(target) == 0 and np.sum(pred) == 0:
+        return 1.0
+    if np.sum(target) == 0 or np.sum(pred) == 0:
+        return 0.0
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * d + 1, 2 * d + 1))
+    gt_boundary = cv2.morphologyEx(target.astype(np.uint8), cv2.MORPH_GRADIENT, kernel) > 0
+    pred_boundary = cv2.morphologyEx(pred.astype(np.uint8), cv2.MORPH_GRADIENT, kernel) > 0
+
+    gt_region = gt_boundary & (target > 0)
+    pred_region = pred_boundary & (pred > 0)
+
+    intersection = np.sum(gt_region & pred_region)
+    union = np.sum(gt_region | pred_region)
+    if union == 0:
+        return 1.0 if np.sum(pred) == 0 and np.sum(target) == 0 else 0.0
+    return float(intersection / (union + 1e-5))
+
+def predict_full_image_direct(model, image, device, target_size=448):
+    """
+    Direct full-image prediction without tiling (Protocol for DeepCrack baseline).
+    Full-image pipeline: dynamic Pad-to-Square -> Resize 448x448 -> model 1 pass -> logits.
     """
     H, W = image.shape[:2]
+    target_dim = max(H, W, target_size)
+    pad_h = target_dim - H
+    pad_w = target_dim - W
+    top = pad_h // 2
+    bottom = pad_h - top
+    left = pad_w // 2
+    right = pad_w - left
+    padded = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+    resized = cv2.resize(padded, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
     
-    pad_h = (32 - (H % 32)) % 32
-    pad_w = (32 - (W % 32)) % 32
-    if pad_h > 0 or pad_w > 0:
-        padded = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
-    else:
-        padded = image
-        
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
     
-    tensor = torch.from_numpy(padded).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
+    tensor = torch.from_numpy(resized).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
     tensor = (tensor - mean) / std
     
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
             logits = model(tensor)
         logits_np = logits.squeeze().cpu().numpy()
-        
-    if pad_h > 0 or pad_w > 0:
-        logits_np = logits_np[:H, :W]
         
     return logits_np
 
@@ -122,10 +144,11 @@ def predict_full_image_tiling_setting_a(model, image, device, tile_size=448, bat
     pred_logits = pred_logits[:H, :W]
     return pred_logits
 
-def predict_full_image_tiling_setting_b(model, image, device, tile_size=448, stride=224, batch_size=16):
+def predict_full_image_tiling_setting_b(model, image, device, tile_size=448, stride=224, batch_size=16, blend_mode='logits'):
     """
     Crack500 Setting B: Overlapping tiling (50% overlap, stride=tile_size//2),
-    average blending logits at overlap regions, and crop back to original (H, W).
+    blending at overlap regions, and crop back to original (H, W).
+    Supports blend_mode='logits' (Option 1) and blend_mode='probs' (Option 2).
     """
     H, W = image.shape[:2]
     
@@ -157,7 +180,7 @@ def predict_full_image_tiling_setting_b(model, image, device, tile_size=448, str
             patches.append(patch_tensor)
             coords.append((y, x))
             
-    pred_logits = np.zeros((pH, pW), dtype=np.float32)
+    accum_map = np.zeros((pH, pW), dtype=np.float32)
     count_map = np.zeros((pH, pW), dtype=np.float32)
     
     for i in range(0, len(patches), batch_size):
@@ -169,12 +192,16 @@ def predict_full_image_tiling_setting_b(model, image, device, tile_size=448, str
             
         for j, logit in enumerate(logits_np):
             y, x = coords[i+j]
-            pred_logits[y:y+tile_size, x:x+tile_size] += logit
+            if blend_mode == 'probs':
+                prob = 1.0 / (1.0 + np.exp(-logit))
+                accum_map[y:y+tile_size, x:x+tile_size] += prob
+            else: # 'logits'
+                accum_map[y:y+tile_size, x:x+tile_size] += logit
             count_map[y:y+tile_size, x:x+tile_size] += 1.0
             
-    pred_logits = pred_logits / np.maximum(count_map, 1.0)
-    pred_logits = pred_logits[:H, :W]
-    return pred_logits
+    blended = accum_map / np.maximum(count_map, 1.0)
+    blended = blended[:H, :W]
+    return blended
 
 # Alias for backward compatibility
 predict_full_image_tiling = predict_full_image_tiling_setting_a
@@ -198,11 +225,21 @@ def resolve_protocol(config, cli_protocol=None):
     else:
         return 'setting_a'
 
-def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, criterion=None, verbose=True):
-    metrics = {'precision': [], 'recall': [], 'dice': [], 'iou': []}
+def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, blend_mode='logits', criterion=None, diagnostic=False, verbose=True):
+    metrics = {
+        'precision': [], 'recall': [], 'dice': [], 'iou': [],
+        'crack_iou': []
+    }
+    if diagnostic:
+        metrics['boundary_iou'] = []
+        metrics['hd95'] = []
     if criterion is not None:
         metrics['loss'] = []
         
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    
     iterator = tqdm(pairs, desc=f"Evaluating [{protocol}]") if verbose else pairs
     
     for img_p, mask_p in iterator:
@@ -215,23 +252,47 @@ def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, cr
         target = (mask > 0).astype(np.uint8)
         
         if protocol == 'direct':
-            logits_np = predict_full_image_direct(model, img, device)
+            # Full-image DeepCrack: dynamic Pad-to-Square -> Resize 448x448 -> model
+            logits_np = predict_full_image_direct(model, img, device, target_size=tile_size)
+            pred = (logits_np > 0.0).astype(np.uint8)
+            
+            # Ground truth target: dynamic Pad-to-Square -> Resize 448x448
+            H, W = target.shape[:2]
+            target_dim = max(H, W, tile_size)
+            pad_h = target_dim - H
+            pad_w = target_dim - W
+            top = pad_h // 2
+            bottom = pad_h - top
+            left = pad_w // 2
+            right = pad_w - left
+            padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+            target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+            
         elif protocol == 'setting_b':
-            logits_np = predict_full_image_tiling_setting_b(model, img, device, tile_size=tile_size, stride=tile_size // 2)
+            blended = predict_full_image_tiling_setting_b(model, img, device, tile_size=tile_size, stride=tile_size // 2, blend_mode=blend_mode)
+            if blend_mode == 'probs':
+                pred = (blended > 0.5).astype(np.uint8)
+                logits_np = blended  # for loss computation approximation
+            else:
+                pred = (blended > 0.0).astype(np.uint8)
+                logits_np = blended
         else: # setting_a
             logits_np = predict_full_image_tiling_setting_a(model, img, device, tile_size=tile_size)
+            pred = (logits_np > 0.0).astype(np.uint8)
             
-        pred = (logits_np > 0.0).astype(np.uint8)
-        
         if criterion is not None:
             log_tensor = torch.from_numpy(logits_np).unsqueeze(0).unsqueeze(0).to(device)
             tgt_tensor = torch.from_numpy(target).unsqueeze(0).unsqueeze(0).float().to(device)
             loss = criterion(log_tensor, tgt_tensor).item()
             metrics['loss'].append(loss)
         
-        tp = np.sum((pred == 1) & (target == 1))
-        fp = np.sum((pred == 1) & (target == 0))
-        fn = np.sum((pred == 0) & (target == 1))
+        tp = int(np.sum((pred == 1) & (target == 1)))
+        fp = int(np.sum((pred == 1) & (target == 0)))
+        fn = int(np.sum((pred == 0) & (target == 1)))
+        
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
         
         precision = tp / (tp + fp + 1e-5)
         recall = tp / (tp + fn + 1e-5)
@@ -243,7 +304,19 @@ def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, cr
         metrics['dice'].append(dice)
         metrics['iou'].append(iou)
         
-    return {k: np.mean(v) for k, v in metrics.items()}
+        if np.sum(target) > 0:
+            metrics['crack_iou'].append(iou)
+            
+        if diagnostic:
+            b_iou = compute_boundary_iou(pred, target, d=2)
+            hd, _ = calculate_hd95_bf1(pred, target)
+            metrics['boundary_iou'].append(b_iou)
+            metrics['hd95'].append(hd)
+            
+    summary = {k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in metrics.items()}
+    # Global Pixel IoU: total TP / (total TP + total FP + total FN)
+    summary['global_pixel_iou'] = float(total_tp / (total_tp + total_fp + total_fn + 1e-5))
+    return summary
 
 def main():
     parser = argparse.ArgumentParser()
@@ -252,6 +325,10 @@ def main():
     parser.add_argument('--protocol', type=str, default='auto',
                         choices=['auto', 'direct', 'setting_a', 'setting_b'],
                         help="Eval protocol: 'direct' (DeepCrack full-image), 'setting_a' (Crack500 non-overlap), 'setting_b' (Crack500 50% overlap)")
+    parser.add_argument('--blend-mode', type=str, default='logits', choices=['logits', 'probs'],
+                        help="Blend method for Setting B: 'logits' (average logits -> threshold 0) or 'probs' (average probabilities -> threshold 0.5)")
+    parser.add_argument('--diagnostic', action='store_true',
+                        help="Compute diagnostic metrics at best checkpoint (Boundary IoU, HD95)")
     args = parser.parse_args()
     
     with open(args.config, 'r') as f:
@@ -280,11 +357,11 @@ def main():
     protocol = resolve_protocol(config, args.protocol)
     print(f"Evaluation Protocol: {protocol}")
     if protocol == 'direct':
-        print("  Mode: Direct full-image prediction (DeepCrack).")
+        print("  Mode: Direct full-image prediction (DeepCrack baseline: dynamic Pad-to-Square -> Resize 448x448).")
     elif protocol == 'setting_a':
         print(f"  Mode: Crack500 Setting A (non-overlapping tiling, tile_size={tile_size}x{tile_size}).")
     elif protocol == 'setting_b':
-        print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, average logit blending).")
+        print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, blend_mode={args.blend_mode}).")
     
     criterion = CrackBinaryLoss()
     
@@ -294,13 +371,21 @@ def main():
             continue
             
         print(f"\n--- Evaluating [{protocol}] on {split.upper()} Set ({len(pairs)} images) ---")
-        res = evaluate_split(model, pairs, device, protocol=protocol, tile_size=tile_size, criterion=criterion)
+        res = evaluate_split(
+            model, pairs, device, protocol=protocol, tile_size=tile_size,
+            blend_mode=args.blend_mode, criterion=criterion, diagnostic=args.diagnostic
+        )
         
-        print(f"{split.upper()} Loss:      {res['loss']:.4f}")
-        print(f"{split.upper()} Precision: {res['precision']:.4f}")
-        print(f"{split.upper()} Recall:    {res['recall']:.4f}")
-        print(f"{split.upper()} Dice/F1:   {res['dice']:.4f}")
-        print(f"{split.upper()} IoU:       {res['iou']:.4f}")
+        print(f"{split.upper()} Loss:               {res.get('loss', 0.0):.4f}")
+        print(f"{split.upper()} Precision:          {res['precision']:.4f}")
+        print(f"{split.upper()} Recall:             {res['recall']:.4f}")
+        print(f"{split.upper()} Dice/F1:            {res['dice']:.4f}")
+        print(f"{split.upper()} Global Pixel IoU:   {res['global_pixel_iou']:.4f}")
+        print(f"{split.upper()} Crack-Present IoU:  {res.get('crack_iou', res['iou']):.4f}")
+        print(f"{split.upper()} Macro IoU:          {res['iou']:.4f}")
+        if args.diagnostic:
+            print(f"{split.upper()} Boundary IoU:       {res.get('boundary_iou', 0.0):.4f}")
+            print(f"{split.upper()} HD95:               {res.get('hd95', 0.0):.4f}")
 
 if __name__ == '__main__':
     main()

@@ -151,6 +151,107 @@ def main(args):
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
     
+    two_stage = getattr(args, 'two_stage', False) or config.get('two_stage', False)
+    
+    if not two_stage:
+        logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
+        total_epochs = int(config.get('epochs', 30))
+        patience = int(config.get('patience', 6))
+        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}")
+        
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05)
+        optimizer = optim.AdamW(param_groups)
+        scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=3)
+        
+        best_dice = 0.0
+        best_loss = float('inf')
+        epochs_no_improve = 0
+        
+        for epoch in range(1, total_epochs + 1):
+            model.train()
+            train_loss = 0.0
+            train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
+            
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs} [Train]")
+            for batch in pbar:
+                images = batch['image'].to(device, non_blocking=True)
+                labels = batch['label'].to(device, non_blocking=True)
+                
+                optimizer.zero_grad(set_to_none=True)
+                
+                with torch.amp.autocast('cuda'):
+                    logits = model(images)
+                    loss = criterion(logits, labels)
+                    
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                train_loss += loss.item()
+                with torch.no_grad():
+                    probs = torch.sigmoid(logits)
+                    acc, dice, iou = calculate_binary_metrics(probs, labels)
+                    train_acc += acc
+                    train_dice += dice
+                    train_iou += iou
+                    
+                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}"})
+                
+            scheduler.step(epoch)
+            
+            model.eval()
+            with torch.no_grad():
+                val_metrics = evaluate_split(model, val_pairs, device, protocol=eval_protocol, tile_size=img_size, criterion=criterion, verbose=False)
+                
+            val_loss = val_metrics['loss']
+            val_dice = val_metrics['dice']
+            
+            train_loss /= len(train_loader)
+            train_dice /= len(train_loader)
+            
+            bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
+            dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
+            logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
+            
+            is_best = False
+            if val_dice > best_dice + 1e-4:
+                is_best = True
+            elif abs(val_dice - best_dice) <= 1e-4:
+                if val_loss < best_loss:
+                    is_best = True
+                    
+            if is_best:
+                best_dice = val_dice
+                best_loss = val_loss
+                epochs_no_improve = 0
+                
+                ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}.pth")
+                torch.save({
+                    'epoch': int(epoch),
+                    'model_state_dict': model.state_dict(),
+                    'best_dice': float(best_dice),
+                    'best_loss': float(best_loss),
+                }, ckpt_path)
+                logger.info(f"*** New BEST model saved with Val Dice: {best_dice:.4f}, Val Loss: {best_loss:.4f} ***")
+            else:
+                epochs_no_improve += 1
+                
+            last_ckpt_path = os.path.join(output_dir, f"last_model_{model_type.lower()}.pth")
+            torch.save({
+                'epoch': int(epoch),
+                'model_state_dict': model.state_dict(),
+                'val_dice': float(val_dice),
+                'val_loss': float(val_loss),
+            }, last_ckpt_path)
+            
+            if epochs_no_improve >= patience:
+                logger.info(f"EarlyStopping triggered at epoch {epoch} (Patience: {patience})")
+                break
+                
+        logger.info(f"Training completed. Best Val Dice: {best_dice:.4f}")
+        return
+
+    # ── Legacy Two-Stage Training (Only when --two-stage is requested) ────────
     total_budget = config.get('epochs', 30)
     stage1_max = min(config.get('stage1_epochs', total_budget // 2), total_budget)
     patience = config.get('patience', 6)
@@ -165,7 +266,6 @@ def main(args):
         stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
         if os.path.exists(stage1_ckpt_path):
             logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
-            # Checkpoint loading happens later, here we just resolve epochs
             if args.stage1_epochs_used is not None:
                 epochs_used_so_far = args.stage1_epochs_used
                 logger.info(f"Using explicitly provided --stage1-epochs-used: {epochs_used_so_far}")
@@ -255,7 +355,6 @@ def main(args):
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
             
-            # Log current LRs to verify differential scaling
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
@@ -310,7 +409,6 @@ def main(args):
                 
         epochs_used_so_far += actual_epochs_this_stage
         
-        # Save actual epochs used metadata for resuming logic
         completion_file = os.path.join(output_dir, f"stage{stage}_completion.json")
         with open(completion_file, 'w') as f:
             json.dump({'epochs_used': actual_epochs_this_stage}, f)
@@ -322,6 +420,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     parser.add_argument('--stage2-only', action='store_true', help='Skip Stage 1 and resume directly to Stage 2 using stage 1 checkpoint')
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
+    parser.add_argument('--two-stage', action='store_true', help='Enable legacy 2-stage ladder training (default is single-stage)')
     args = parser.parse_args()
     main(args)
 

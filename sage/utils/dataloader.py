@@ -14,6 +14,26 @@ import logging
 Image.MAX_IMAGE_PIXELS = None 
 
 
+def pad_to_square(image: np.ndarray, mask: np.ndarray, min_size: int = 448):
+    """
+    Dynamic Pad-to-Square based on actual image dimensions:
+        target = max(H, W, min_size)
+    Pads symmetrically with BORDER_CONSTANT (0) to target x target, preserving aspect ratio.
+    """
+    H, W = image.shape[:2]
+    target = max(H, W, min_size)
+    pad_h = target - H
+    pad_w = target - W
+    top = pad_h // 2
+    bottom = pad_h - top
+    left = pad_w // 2
+    right = pad_w - left
+
+    padded_img = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+    padded_mask = cv2.copyMakeBorder(mask, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+    return padded_img, padded_mask
+
+
 def get_transformations(img_size, crop_mode='random'):
     """
     Get data augmentation transformations for training and validation
@@ -27,12 +47,12 @@ def get_transformations(img_size, crop_mode='random'):
             A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
         ]
     else:
+        # Dynamic Pad-to-Square is performed in __getitem__ before transforms.
+        # Resize then scales the square image to (img_size, img_size) with nearest mask interpolation.
         base_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
             A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
         ]
         val_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
             A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
         ]
 
@@ -278,14 +298,14 @@ class ConfigurableMedicalDataset(Dataset):
         print(f"[ConfigurableDataset] Loaded {split.upper()}: {len(self.samples)} samples from {img_dir}")
 
         # 5. Set Transforms
+        self.crop_mode = self.config.get('crop_mode', 'random')
         if transform:
             self.transforms = transform
             self.crop_transform = None
             self.aug_transform = None
         else:
             # Default transforms
-            crop_mode = self.config.get('crop_mode', 'random')
-            train_t, val_t, crop_t, aug_t = get_transformations(image_size, crop_mode=crop_mode)
+            train_t, val_t, crop_t, aug_t = get_transformations(image_size, crop_mode=self.crop_mode)
             self.transforms = train_t if split == 'train' else val_t
             self.crop_transform = crop_t if split == 'train' else None
             self.aug_transform = aug_t if split == 'train' else None
@@ -345,6 +365,11 @@ class ConfigurableMedicalDataset(Dataset):
         mask   = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
         # Binarize mask to {0, 1} before applying transforms
         mask   = (mask > 0).astype(np.uint8)
+
+        # Dynamic Pad-to-Square for resize mode (DeepCrack protocol):
+        # target = max(H, W, img_size), preserve aspect ratio before resizing to 448x448
+        if getattr(self, 'crop_mode', 'random') == 'resize':
+            image, mask = pad_to_square(image, mask, self.image_size)
 
         if self.transforms:
             augmented = self.transforms(image=image, mask=mask)

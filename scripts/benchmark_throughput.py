@@ -1,4 +1,9 @@
-﻿import time
+import time
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import torch
 import gc
 from sage.networks import create_b0_unet
@@ -12,7 +17,7 @@ def main():
     else:
         gpu_name = "CPU"
 
-    batch_sizes = [16, 20, 24, 28]
+    batch_sizes = [8, 12, 16, 20, 24]
     img_size = 448
     results = []
 
@@ -29,7 +34,8 @@ def main():
         # Tạo model/optimizer/scaler SẠCH RIÊNG cho mỗi batch size
         model = create_b0_unet().to(device)
         model.train()
-        criterion = torch.nn.BCEWithLogitsLoss()
+        from scripts.train_crack import CrackBinaryLoss
+        criterion = CrackBinaryLoss(bce_weight=1.0, dice_weight=1.5)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         scaler = torch.cuda.amp.GradScaler()
 
