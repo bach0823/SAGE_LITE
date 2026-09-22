@@ -5,20 +5,29 @@ Behavior probe for ConfigurableMedicalDataset with negative-pool implementation.
 
 Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
 
-The probe observes the FINAL ACCEPTED distribution by inspecting returned labels:
-  - fg_pixels = (label > 0).sum()
-  - fg >= 20  → accepted as positive
-  - fg < 20   → accepted as negative
+What this probe measures
+------------------------
+- Output-class distribution: fraction of returned samples where fg < 20 vs >= 20
+  AFTER the full pipeline (crop → aug_transform → normalize → tensor).
 
-Note on expected ratios:
-  - Pool guarantees P(valid negative | negative request) = 1  (by construction).
-  - 85/15 is the expected TARGET SAMPLING RATIO set at __getitem__ call time.
-    Actual observed ratio may differ slightly due to random variation over 3000 samples.
+  Because spatial augmentation (flips, ShiftScaleRotate) can change fg counts,
+  this distribution is NOT equivalent to the target sampling ratio (85/15).
+  Do NOT use fg from returned labels to assert exact 85/15.
+
+- The true guarantee for negative correctness comes from the assertion inside
+  ConfigurableMedicalDataset.__getitem__:
+      assert fg_actual < 20, "Pool entry violated fg threshold ..."
+  which fires BEFORE augmentation. If that assertion never raises here,
+  the pool is intact and no silent-accept occurred.
+
+- To measure exact target ratio (positive/negative targets chosen at
+  __getitem__ call time), production telemetry in dataloader itself is required.
+  This probe does not attempt to infer it from post-augmentation fg.
 
 Run from repo root on Colab (after building the pool):
     python scripts/run_behavior_probe.py
 
-Exits with code 1 on any RuntimeError.
+Exits with code 1 on any RuntimeError or shape failure.
 """
 
 import os
@@ -63,11 +72,11 @@ def main():
     np.random.seed(SEED)
 
     # ── Metrics ───────────────────────────────────────────────────────────────
-    accepted_positive = 0   # returned label has fg >= 20
-    accepted_negative = 0   # returned label has fg < 20
+    returned_fg_lt20  = 0   # output fg < 20 after full pipeline
+    returned_fg_ge20  = 0   # output fg >= 20 after full pipeline
     fg_pixels_log     = []
     runtime_errors    = 0
-    shape_ok          = True
+    shape_failures    = []
 
     print(f"\n2. Running {N_SAMPLES} __getitem__ calls on REAL implementation ...")
 
@@ -75,6 +84,12 @@ def main():
         idx = random.randint(0, len(ds) - 1)
         try:
             sample = ds[idx]
+        except AssertionError as e:
+            # Pool integrity assertion fired inside dataloader — this is a hard failure
+            print(f"\n[!] Pool integrity AssertionError at sample {i}: {e}")
+            runtime_errors += 1
+            import traceback; traceback.print_exc()
+            continue
         except RuntimeError as e:
             runtime_errors += 1
             print(f"\n[!] RuntimeError at sample {i}: {e}")
@@ -82,59 +97,58 @@ def main():
             continue
 
         label = sample["label"]   # torch.Tensor (H, W), dtype=long
+        image = sample["image"]   # torch.Tensor (3, H, W)
 
-        # Shape check
+        # Shape checks
+        if tuple(image.shape) != (3, IMAGE_SIZE, IMAGE_SIZE):
+            shape_failures.append(f"sample={i} image={tuple(image.shape)}")
         if tuple(label.shape) != (IMAGE_SIZE, IMAGE_SIZE):
-            shape_ok = False
-            print(f"  WARN: unexpected label shape {tuple(label.shape)} at sample {i}")
+            shape_failures.append(f"sample={i} label={tuple(label.shape)}")
 
         fg = int((label > 0).sum().item())
         fg_pixels_log.append(fg)
 
-        if fg >= 20:
-            accepted_positive += 1
+        if fg < 20:
+            returned_fg_lt20 += 1
         else:
-            accepted_negative += 1
+            returned_fg_ge20 += 1
 
     # ── Report ────────────────────────────────────────────────────────────────
-    total_returned = accepted_positive + accepted_negative
-    pos_pct = accepted_positive / total_returned * 100 if total_returned > 0 else 0
-    neg_pct = accepted_negative / total_returned * 100 if total_returned > 0 else 0
+    total_returned = returned_fg_lt20 + returned_fg_ge20
+    pct_lt20 = returned_fg_lt20 / total_returned * 100 if total_returned else 0
+    pct_ge20 = returned_fg_ge20 / total_returned * 100 if total_returned else 0
 
     print(f"\n{'='*70}")
     print(f"=== BEHAVIOR PROBE RESULTS ===")
     print(f"{'='*70}")
-    print(f"Total samples requested       : {N_SAMPLES}")
-    print(f"Samples returned successfully : {total_returned}")
-    print(f"RuntimeErrors                 : {runtime_errors}")
-    print(f"All output shapes correct     : {shape_ok and runtime_errors == 0}")
+    print(f"Total samples requested   : {N_SAMPLES}")
+    print(f"Samples returned OK       : {total_returned}")
+    print(f"RuntimeErrors             : {runtime_errors}")
+    print(f"Shape failures            : {len(shape_failures)}")
+
+    print(f"\n[Output-class distribution — measured on labels AFTER full pipeline]")
+    print(f"  fg >= 20 (crack present) : {returned_fg_ge20:>5}  ({pct_ge20:.1f}%)")
+    print(f"  fg <  20 (no crack)      : {returned_fg_lt20:>5}  ({pct_lt20:.1f}%)")
     print()
-    print(f"[Final Accepted Distribution — measured from returned labels]")
-    print(f"  Positive (fg >= 20) : {accepted_positive:>5}  ({pos_pct:.1f}%)")
-    print(f"  Negative (fg <  20) : {accepted_negative:>5}  ({neg_pct:.1f}%)")
-    print()
-    print(f"  Note: 85/15 is the expected TARGET SAMPLING RATIO set per __getitem__ call.")
-    print(f"        Pool guarantees P(valid negative | negative request) = 1 by construction.")
+    print(f"  NOTE: This is the OUTPUT distribution after crop + spatial aug.")
+    print(f"        Spatial augmentation can shift fg counts, so this is NOT")
+    print(f"        the same as the target sampling ratio (85% pos / 15% neg).")
+    print(f"        Pool guarantee: P(valid negative | negative request) = 1,")
+    print(f"        enforced by assertion in ConfigurableMedicalDataset.__getitem__")
+    print(f"        BEFORE augmentation. Zero AssertionErrors above = pool intact.")
 
     if fg_pixels_log:
         fg = np.array(fg_pixels_log)
-        print(f"\n[FG pixel distribution of ALL returned crops]")
+        print(f"\n[FG pixel distribution of ALL returned labels (post-augmentation)]")
         print(f"  Min    : {fg.min()}")
         print(f"  Max    : {fg.max()}")
         print(f"  Mean   : {fg.mean():.1f}")
         print(f"  Median : {np.median(fg):.1f}")
-        print(f"  fg <  20 (negative) : {(fg < 20).sum()}")
-        print(f"  fg >= 20 (positive) : {(fg >= 20).sum()}")
 
-        # Verify pool integrity: all negatives must genuinely have fg < 20
-        neg_with_high_fg = sum(1 for v in fg_pixels_log[:accepted_negative] if v >= 20)
-        if neg_with_high_fg > 0:
-            print(f"\n  [!] INTEGRITY VIOLATION: {neg_with_high_fg} 'negative' samples "
-                  f"had fg >= 20. Pool may be stale.")
-        else:
-            print(f"\n  Pool integrity: OK — all accepted negatives have fg < 20.")
+    if shape_failures:
+        print(f"\n  Shape failure details: {shape_failures[:5]}")
 
-    passed = (runtime_errors == 0 and shape_ok)
+    passed = (runtime_errors == 0 and len(shape_failures) == 0)
     print(f"\n{'='*70}")
     print(f"OVERALL: {'PASS' if passed else 'FAIL'}")
     print(f"{'='*70}")
