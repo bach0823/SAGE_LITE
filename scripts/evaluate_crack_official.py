@@ -213,9 +213,12 @@ def resolve_protocol(config, cli_protocol=None):
     - 'setting_a': Crack500 Setting A (non-overlap 448x448)
     - 'setting_b': Crack500 Setting B (overlap 50%, stride=224, average blending)
     """
-    if cli_protocol and cli_protocol != 'auto':
+    if cli_protocol and cli_protocol not in ('auto', 'all'):
         return cli_protocol
         
+    if 'eval_protocol' in config:
+        return config['eval_protocol']
+
     dataset_name = str(config.get('dataset', '')).lower()
     root_dir = str(config.get('root_dir', '')).lower()
     crop_mode = str(config.get('crop_mode', '')).lower()
@@ -225,7 +228,7 @@ def resolve_protocol(config, cli_protocol=None):
     else:
         return 'setting_a'
 
-def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, blend_mode='logits', criterion=None, diagnostic=False, verbose=True):
+def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, blend_mode='probs', criterion=None, diagnostic=False, verbose=True):
     metrics = {
         'precision': [], 'recall': [], 'dice': [], 'iou': [],
         'crack_iou': []
@@ -323,10 +326,10 @@ def main():
     parser.add_argument('--config', type=str, required=True)
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--protocol', type=str, default='auto',
-                        choices=['auto', 'direct', 'setting_a', 'setting_b'],
-                        help="Eval protocol: 'direct' (DeepCrack full-image), 'setting_a' (Crack500 non-overlap), 'setting_b' (Crack500 50% overlap)")
-    parser.add_argument('--blend-mode', type=str, default='logits', choices=['logits', 'probs'],
-                        help="Blend method for Setting B: 'logits' (average logits -> threshold 0) or 'probs' (average probabilities -> threshold 0.5)")
+                        choices=['auto', 'direct', 'setting_a', 'setting_b', 'all'],
+                        help="Eval protocol: 'direct' (DeepCrack full-image), 'setting_a' (Crack500 non-overlap), 'setting_b' (Crack500 50% overlap), 'all' (runs both Setting A & B)")
+    parser.add_argument('--blend-mode', type=str, default='probs', choices=['logits', 'probs'],
+                        help="Blend method for Setting B: 'probs' (average probabilities -> threshold 0.5) or 'logits' (average logits -> threshold 0)")
     parser.add_argument('--diagnostic', action='store_true',
                         help="Compute diagnostic metrics at best checkpoint (Boundary IoU, HD95)")
     args = parser.parse_args()
@@ -354,38 +357,52 @@ def main():
     model.eval()
         
     tile_size = config.get('img_size', 448)
-    protocol = resolve_protocol(config, args.protocol)
-    print(f"Evaluation Protocol: {protocol}")
-    if protocol == 'direct':
-        print("  Mode: Direct full-image prediction (DeepCrack baseline: dynamic Pad-to-Square -> Resize 448x448).")
-    elif protocol == 'setting_a':
-        print(f"  Mode: Crack500 Setting A (non-overlapping tiling, tile_size={tile_size}x{tile_size}).")
-    elif protocol == 'setting_b':
-        print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, blend_mode={args.blend_mode}).")
     
+    if args.protocol == 'all':
+        default_proto = resolve_protocol(config)
+        if default_proto == 'direct':
+            protocols_to_run = ['direct']
+        else:
+            protocols_to_run = ['setting_a', 'setting_b']
+    elif args.protocol != 'auto':
+        protocols_to_run = [args.protocol]
+    else:
+        protocols_to_run = [resolve_protocol(config)]
+
     criterion = CrackBinaryLoss()
-    
-    for split in ['val', 'test']:
-        pairs = get_image_mask_pairs(config, split)
-        if not pairs:
-            continue
-            
-        print(f"\n--- Evaluating [{protocol}] on {split.upper()} Set ({len(pairs)} images) ---")
-        res = evaluate_split(
-            model, pairs, device, protocol=protocol, tile_size=tile_size,
-            blend_mode=args.blend_mode, criterion=criterion, diagnostic=args.diagnostic
-        )
+
+    for protocol in protocols_to_run:
+        print("\n" + "=" * 60)
+        print(f"EVALUATION PROTOCOL: {protocol.upper()}")
+        print("=" * 60)
+        if protocol == 'direct':
+            print("  Mode: Direct full-image prediction (DeepCrack baseline: dynamic Pad-to-Square -> Resize 448x448).")
+        elif protocol == 'setting_a':
+            print(f"  Mode: Crack500 Setting A (non-overlapping tiling, tile_size={tile_size}x{tile_size}).")
+        elif protocol == 'setting_b':
+            print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, blend_mode={args.blend_mode}).")
         
-        print(f"{split.upper()} Loss:               {res.get('loss', 0.0):.4f}")
-        print(f"{split.upper()} Precision:          {res['precision']:.4f}")
-        print(f"{split.upper()} Recall:             {res['recall']:.4f}")
-        print(f"{split.upper()} Dice/F1:            {res['dice']:.4f}")
-        print(f"{split.upper()} Global Pixel IoU:   {res['global_pixel_iou']:.4f}")
-        print(f"{split.upper()} Crack-Present IoU:  {res.get('crack_iou', res['iou']):.4f}")
-        print(f"{split.upper()} Macro IoU:          {res['iou']:.4f}")
-        if args.diagnostic:
-            print(f"{split.upper()} Boundary IoU:       {res.get('boundary_iou', 0.0):.4f}")
-            print(f"{split.upper()} HD95:               {res.get('hd95', 0.0):.4f}")
+        for split in ['val', 'test']:
+            pairs = get_image_mask_pairs(config, split)
+            if not pairs:
+                continue
+                
+            print(f"\n--- Evaluating [{protocol}] on {split.upper()} Set ({len(pairs)} images) ---")
+            res = evaluate_split(
+                model, pairs, device, protocol=protocol, tile_size=tile_size,
+                blend_mode=args.blend_mode, criterion=criterion, diagnostic=args.diagnostic
+            )
+            
+            print(f"{split.upper()} Loss:               {res.get('loss', 0.0):.4f}")
+            print(f"{split.upper()} Precision:          {res['precision']:.4f}")
+            print(f"{split.upper()} Recall:             {res['recall']:.4f}")
+            print(f"{split.upper()} Dice/F1:            {res['dice']:.4f}")
+            print(f"{split.upper()} Global Pixel IoU:   {res['global_pixel_iou']:.4f}")
+            print(f"{split.upper()} Crack-Present IoU:  {res.get('crack_iou', res['iou']):.4f}")
+            print(f"{split.upper()} Macro IoU:          {res['iou']:.4f}")
+            if args.diagnostic:
+                print(f"{split.upper()} Boundary IoU:       {res.get('boundary_iou', 0.0):.4f}")
+                print(f"{split.upper()} HD95:               {res.get('hd95', 0.0):.4f}")
 
 if __name__ == '__main__':
     main()
