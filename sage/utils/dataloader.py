@@ -29,18 +29,21 @@ def get_transformations(img_size, crop_mode='random'):
             A.Resize(img_size, img_size)
         ]
 
-    train_transform = A.Compose(base_crop + [
+    aug_list = [
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5, 
-                           border_mode=cv2.BORDER_CONSTANT), 
+        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5, border_mode=cv2.BORDER_CONSTANT), 
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.5),
         A.GaussianBlur(blur_limit=3, p=0.3),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
-    ])
+    ]
+    
+    train_transform = A.Compose(base_crop + aug_list)
+    crop_transform = A.Compose(base_crop)
+    aug_transform = A.Compose(aug_list)
     
     val_transforms = A.Compose([
         A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
@@ -48,7 +51,7 @@ def get_transformations(img_size, crop_mode='random'):
         ToTensorV2(),
     ])
     
-    return train_transform, val_transforms
+    return train_transform, val_transforms, crop_transform, aug_transform
 
 class UniversalMedicalDataset(Dataset):
     """
@@ -138,7 +141,7 @@ class UniversalMedicalDataset(Dataset):
         if transform:
             self.transform = transform
         else:
-            train_t, val_t = get_transformations(image_size)
+            train_t, val_t, _, _ = get_transformations(image_size)
             self.transform = train_t if split == 'train' else val_t
 
     def __len__(self):
@@ -201,6 +204,10 @@ class ConfigurableMedicalDataset(Dataset):
 
         root_dir = self.config.get('root_dir', '')
         
+        # Branch logic: DeepCrack vs Crack500 based on config explicitly, or auto-detect
+        self.is_crack500 = 'Crack500' in root_dir
+        self.use_smart_filter = self.config.get('smart_filter', self.is_crack500)
+        
         # 2. Get paths for the specific split
         if split not in self.config:
             # Fallback: if 'test' is requested but not in config, use 'val' or raise error
@@ -262,74 +269,97 @@ class ConfigurableMedicalDataset(Dataset):
         # 5. Set Transforms
         if transform:
             self.transforms = transform
+            self.crop_transform = None
+            self.aug_transform = None
         else:
             # Default transforms
             crop_mode = self.config.get('crop_mode', 'random')
-            train_t, val_t = get_transformations(image_size, crop_mode=crop_mode)
+            train_t, val_t, crop_t, aug_t = get_transformations(image_size, crop_mode=crop_mode)
             self.transforms = train_t if split == 'train' else val_t
+            self.crop_transform = crop_t if split == 'train' else None
+            self.aug_transform = aug_t if split == 'train' else None
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+        MAX_RESAMPLE = 10
+        import random
         
-        # Load Image
-        image = cv2.imread(sample['image'])
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Load Mask
-        mask = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
-        
-        # Force binary mask (0/1) to avoid label out-of-range in CE loss
-        mask = (mask > 0).astype(np.uint8)
-        
-        # Apply Transforms with Smart Filtering for Training (Crack500 Protocol)
-        if self.split == 'train' and self.transforms:
-            # Target distribution: ~85% positive patches (contain cracks), ~15% pure negative
-            import random
-            is_positive_target = random.random() < 0.85
+        for source_try in range(MAX_RESAMPLE):
+            sample = self.samples[idx]
             
-            best_aug = None
-            best_fg = -1 if is_positive_target else float('inf')
+            # Load Image
+            image = cv2.imread(sample['image'])
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
-            for _ in range(10): # try up to 10 times to find a matching patch
-                augmented = self.transforms(image=image, mask=mask)
-                fg_pixels = (augmented['mask'] > 0).sum()
-                has_crack = fg_pixels >= 20
+            # Load Mask
+            mask = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
+            
+            # Force binary mask (0/1) to avoid label out-of-range in CE loss
+            mask = (mask > 0).astype(np.uint8)
+            
+            # Apply Transforms with Smart Filtering for Training (Crack500 Protocol)
+            if self.split == 'train' and self.crop_transform and self.use_smart_filter:
+                # Target distribution: 85% probability positive patches, 15% probability negative
+                is_positive_target = random.random() < 0.85
                 
-                # Update best candidate
-                if is_positive_target and fg_pixels > best_fg:
-                    best_fg = fg_pixels
-                    best_aug = augmented
-                elif not is_positive_target and fg_pixels < best_fg:
-                    best_fg = fg_pixels
-                    best_aug = augmented
-                
-                # Early break if target satisfied
-                if is_positive_target and has_crack:
-                    break
-                elif not is_positive_target and not has_crack:
-                    break
+                # Protocol: Mốc 20
+                # Fallback: Reject candidate completely and iteratively sample another index.
+                success = False
+                for _ in range(20):
+                    cropped = self.crop_transform(image=image, mask=mask)
+                    fg_pixels = (cropped['mask'] > 0).sum()
+                    has_crack = fg_pixels >= 20
                     
-            image = best_aug['image']
-            label = best_aug['mask']
-        elif self.transforms:
-            augmented = self.transforms(image=image, mask=mask)
-            image = augmented['image']
-            label = augmented['mask']
-        else:
-            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-            label = torch.from_numpy(mask).long()
-            
-        if label.dtype != torch.long:
-            label = label.long()
-            
-        return {
-            'image': image,
-            'label': label,
-            'case_name': sample['case_name']
-        }
+                    if is_positive_target and has_crack:
+                        success = True; break
+                    elif not is_positive_target and not has_crack:
+                        success = True; break
+                        
+                if not success:
+                    idx = random.randint(0, len(self.samples) - 1)
+                    continue
+                    
+                # Apply spatial/photometric aug + norm + tensor to the valid crop
+                augmented = self.aug_transform(image=cropped['image'], mask=cropped['mask'])
+                image = augmented['image']
+                label = augmented['mask']
+                
+                if label.dtype != torch.long:
+                    label = label.long()
+                    
+                return {
+                    'image': image,
+                    'label': label,
+                    'case_name': sample['case_name']
+                }
+                
+            elif self.transforms:
+                augmented = self.transforms(image=image, mask=mask)
+                image = augmented['image']
+                label = augmented['mask']
+                if label.dtype != torch.long:
+                    label = label.long()
+                return {
+                    'image': image,
+                    'label': label,
+                    'case_name': sample['case_name']
+                }
+            else:
+                image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+                label = torch.from_numpy(mask).long()
+                if label.dtype != torch.long:
+                    label = label.long()
+                return {
+                    'image': image,
+                    'label': label,
+                    'case_name': sample['case_name']
+                }
+                
+        # If MAX_RESAMPLE exceeded, FAIL-FAST
+        raise RuntimeError(f"FAIL-FAST: Exceeded {MAX_RESAMPLE} source resampling attempts in dataloader. "
+                           f"Current policy (Crack500 smart filter) is rejecting too many candidates.")
 
 def get_dataset_from_config(config_path, split='train', image_size=512):
     """Helper to create dataset directly from yaml path"""
