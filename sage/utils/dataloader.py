@@ -62,9 +62,6 @@ def get_transformations(img_size, crop_mode='random'):
         A.RandomRotate90(p=0.5),
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.GaussianBlur(blur_limit=3, p=0.3),
-        A.CLAHE(clip_limit=2.0, p=0.5),
-        A.ElasticTransform(alpha=1, sigma=50, p=0.5),
-        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ]

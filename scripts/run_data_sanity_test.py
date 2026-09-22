@@ -84,7 +84,31 @@ def main():
     
     # ── 2. Crack500 Checks ────────────────────────────────────────────────────
     crack500_cfg = 'configs/b0_crack500.yaml'
-    if os.path.exists(crack500_cfg):
+    c500_local = "D:/truong/SpecialSubjectTTNT/datasets/CRACK500_canonical"
+    if os.path.exists(c500_local):
+        tmp_c500 = {
+            'model': 'B0',
+            'root_dir': c500_local,
+            'crop_mode': 'random',
+            'smart_filter': True,
+            'img_size': 448,
+            'mask_suffix': '',
+            'train': {'images': 'traincrop', 'masks': 'traincrop'},
+            'val': {'images': 'valcrop', 'masks': 'valcrop'},
+            'test': {'images': 'testcrop', 'masks': 'testcrop'}
+        }
+        tmp_path_c500 = 'temp_sanity_c500.yaml'
+        with open(tmp_path_c500, 'w') as f:
+            yaml.dump(tmp_c500, f)
+        try:
+            ds_c500_train = ConfigurableMedicalDataset(tmp_path_c500, split='train', image_size=448)
+            all_pass &= test_split(ds_c500_train, "Crack500 Train (Smart Filter)", max_samples=50, expected_shape=(448, 448))
+            ds_c500_val = ConfigurableMedicalDataset(tmp_path_c500, split='val', image_size=448)
+            all_pass &= test_split(ds_c500_val, "Crack500 Val", max_samples=50, expected_shape=None)
+        finally:
+            if os.path.exists(tmp_path_c500):
+                os.remove(tmp_path_c500)
+    elif os.path.exists(crack500_cfg):
         try:
             ds_c500_train = ConfigurableMedicalDataset(crack500_cfg, split='train', image_size=448)
             all_pass &= test_split(ds_c500_train, "Crack500 Train (Smart Filter)", max_samples=50, expected_shape=(448, 448))
@@ -94,7 +118,6 @@ def main():
             
         try:
             ds_c500_val = ConfigurableMedicalDataset(crack500_cfg, split='val', image_size=448)
-            # In Crack500 val, standard evaluation is full resolution or padded
             all_pass &= test_split(ds_c500_val, "Crack500 Val", max_samples=len(ds_c500_val), expected_shape=None)
         except Exception as e:
             print(f"NOTE on Crack500 Val: {e}")
