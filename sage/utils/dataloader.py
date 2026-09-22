@@ -286,6 +286,9 @@ class ConfigurableMedicalDataset(Dataset):
         MAX_RESAMPLE = 10
         import random
         
+        # Lock sampling target ONCE per __getitem__ request so source resamples preserve the same target
+        is_positive_target = random.random() < 0.85
+        
         for source_try in range(MAX_RESAMPLE):
             sample = self.samples[idx]
             
@@ -301,8 +304,7 @@ class ConfigurableMedicalDataset(Dataset):
             
             # Apply Transforms with Smart Filtering for Training (Crack500 Protocol)
             if self.split == 'train' and self.crop_transform and self.use_smart_filter:
-                # Target distribution: 85% probability positive patches, 15% probability negative
-                is_positive_target = random.random() < 0.85
+                # Use the target locked at the start of the request
                 
                 # Protocol: Mốc 20
                 # Fallback: Reject candidate completely and iteratively sample another index.
