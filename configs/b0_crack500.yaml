@@ -12,9 +12,10 @@ mask_suffix: ""
 smart_filter: true
 crop_mode: "random"
 
-# root_dir for local dev; override on Colab:
-#   root_dir: "/content/dataset/Crack500"
-root_dir: "temp_data/dataset/Crack500"
+# root_dir — override per environment:
+#   Colab : root_dir: "/content/dataset/Crack500"
+#   Local (canonical pre-cropped): root_dir: "D:/truong/SpecialSubjectTTNT/datasets/CRACK500_canonical"
+root_dir: "/content/dataset/Crack500"
 
 train:
   images: "train/images"
@@ -27,5 +28,3 @@ val:
 test:
   images: "test/images"
   masks: "test/masks"
-
-
