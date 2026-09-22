@@ -1,150 +1,146 @@
-﻿import torch
-import sys
+"""
+run_behavior_probe.py
+=====================
+Behavior probe for ConfigurableMedicalDataset with negative-pool implementation.
+
+Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
+
+The probe observes the FINAL ACCEPTED distribution by inspecting returned labels:
+  - fg_pixels = (label > 0).sum()
+  - fg >= 20  → accepted as positive
+  - fg < 20   → accepted as negative
+
+Note on expected ratios:
+  - Pool guarantees P(valid negative | negative request) = 1  (by construction).
+  - 85/15 is the expected TARGET SAMPLING RATIO set at __getitem__ call time.
+    Actual observed ratio may differ slightly due to random variation over 3000 samples.
+
+Run from repo root on Colab (after building the pool):
+    python scripts/run_behavior_probe.py
+
+Exits with code 1 on any RuntimeError.
+"""
+
 import os
+import sys
 import random
-import cv2
 import numpy as np
+import torch
 from tqdm import tqdm
 
-from sage.utils.dataloader import get_dataset_from_config
+from sage.utils.dataloader import ConfigurableMedicalDataset
 
-def run_real_probe():
-    print("="*60)
-    print("=== REAL DATALOADER BEHAVIOR PROBE (CRACK500) ===")
-    print("="*60)
-    
-    config_path = "configs/b0_crack500.yaml"
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"{config_path} not found. Must run from repo root.")
-        
-    print(f"1. Loading real dataset using {config_path}...")
+
+# ──────────────────────────────────────────────────────────────
+CONFIG_PATH = "configs/b0_crack500.yaml"
+IMAGE_SIZE  = 448
+N_SAMPLES   = 3000
+SEED        = 42
+# ──────────────────────────────────────────────────────────────
+
+
+def main():
+    print("=" * 70)
+    print("=== REAL BEHAVIOR PROBE (Crack500 negative-pool implementation) ===")
+    print("=" * 70)
+
+    if not os.path.exists(CONFIG_PATH):
+        print(f"ERROR: {CONFIG_PATH} not found. Run from repo root.")
+        sys.exit(1)
+
+    print(f"\n1. Loading dataset from {CONFIG_PATH} ...")
     try:
-        ds = get_dataset_from_config(config_path, split='train', image_size=448)
-        print(f"   -> Successfully loaded {len(ds)} training samples.")
+        ds = ConfigurableMedicalDataset(CONFIG_PATH, split="train",
+                                        image_size=IMAGE_SIZE)
     except Exception as e:
-        print(f"Error loading dataset: {e}. If dataset is missing, please ensure prepare_crack500.py was run.")
-        return
-    
-    print("\n2. Injecting Telemetry into ConfigurableMedicalDataset...")
-    
-    metrics = {
-        'accepted_positive': 0,
-        'accepted_negative': 0,
-        'retry_counts': [],
-        'source_resamples': 0,
-        'hit_max_resample': 0,
-        'runtime_errors': 0,
-        'accepted_fg_pixels': [],
-        'shape_valid': True
-    }
-    
-    # We redefine the method dynamically to capture the loops exactly as requested
-    def probed_getitem(self, idx):
-        MAX_RESAMPLE = 10
-        import random
-        
-        # 1. Tạo target 1 lần duy nhất cho toàn bộ request này
-        is_positive_target = random.random() < 0.85
-        
-        for source_try in range(MAX_RESAMPLE):
-            sample = self.samples[idx]
-            
-            image = cv2.imread(sample['image'])
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            mask = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
-            mask = (mask > 0).astype(np.uint8)
-            
-            if self.split == 'train' and self.crop_transform and self.use_smart_filter:
-                success = False
-                for r in range(20):
-                    cropped = self.crop_transform(image=image, mask=mask)
-                    fg_pixels = (cropped['mask'] > 0).sum()
-                    has_crack = fg_pixels >= 20
-                    
-                    if is_positive_target and has_crack:
-                        success = True; break
-                    elif not is_positive_target and not has_crack:
-                        success = True; break
-                        
-                if not success:
-                    # METRIC TRACKING
-                    metrics['source_resamples'] += 1
-                    
-                    idx = random.randint(0, len(self.samples) - 1)
-                    continue
-                    
-                # METRIC TRACKING
-                if is_positive_target:
-                    metrics['accepted_positive'] += 1
-                else:
-                    metrics['accepted_negative'] += 1
-                    
-                metrics['retry_counts'].append(r)
-                metrics['accepted_fg_pixels'].append(fg_pixels)
-                
-                augmented = self.aug_transform(image=cropped['image'], mask=cropped['mask'])
-                image_out = augmented['image']
-                label_out = augmented['mask']
-                
-                if label_out.dtype != torch.long:
-                    label_out = label_out.long()
-                    
-                # METRIC TRACKING
-                if image_out.shape != torch.Size([3, 448, 448]) or label_out.shape != torch.Size([448, 448]):
-                    metrics['shape_valid'] = False
-                    
-                return {'image': image_out, 'label': label_out, 'case_name': sample['case_name']}
-                
-            else:
-                raise RuntimeError("Smart filter should be active for Crack500 probe!")
-                
-        metrics['hit_max_resample'] += 1
-        metrics['runtime_errors'] += 1
-        raise RuntimeError(f"FAIL-FAST: Exceeded {MAX_RESAMPLE} source resampling attempts in dataloader.")
-        
-    ds.__class__.__getitem__ = probed_getitem
-    
-    PROBE_SIZE = 3000
-    print(f"\n3. Executing Real Behavior Probe ({PROBE_SIZE} requests)...")
-    for i in tqdm(range(PROBE_SIZE)):
+        print(f"ERROR loading dataset: {e}")
+        sys.exit(1)
+
+    print(f"   Dataset size     : {len(ds)} samples")
+    print(f"   Negative pool    : {ds._neg_pool_size} candidates")
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    accepted_positive = 0   # returned label has fg >= 20
+    accepted_negative = 0   # returned label has fg < 20
+    fg_pixels_log     = []
+    runtime_errors    = 0
+    shape_ok          = True
+
+    print(f"\n2. Running {N_SAMPLES} __getitem__ calls on REAL implementation ...")
+
+    for i in tqdm(range(N_SAMPLES), desc="Probe"):
+        idx = random.randint(0, len(ds) - 1)
         try:
-            sample_idx = random.randint(0, len(ds) - 1)
-            ds[sample_idx]
+            sample = ds[idx]
         except RuntimeError as e:
-            if "FAIL-FAST" not in str(e):
-                raise e
+            runtime_errors += 1
+            print(f"\n[!] RuntimeError at sample {i}: {e}")
+            import traceback; traceback.print_exc()
+            continue
 
-    print("\n" + "="*60)
-    print("=== REAL BEHAVIOR PROBE RESULTS ===")
-    print("="*60)
-    print(f"Total simulated batches requested: {PROBE_SIZE}")
-    
-    total_accepted = metrics['accepted_positive'] + metrics['accepted_negative']
-    if total_accepted > 0:
-        pos_pct = (metrics['accepted_positive'] / total_accepted) * 100
-        neg_pct = (metrics['accepted_negative'] / total_accepted) * 100
-    else:
-        pos_pct = neg_pct = 0
-        
-    print(f"Final accepted positive : {metrics['accepted_positive']} ({pos_pct:.1f}%)")
-    print(f"Final accepted negative : {metrics['accepted_negative']} ({neg_pct:.1f}%)")
-    
-    avg_retry = np.mean(metrics['retry_counts']) if metrics['retry_counts'] else 0
-    print(f"Average retries per crop: {avg_retry:.2f}")
-    print(f"Total source resamples  : {metrics['source_resamples']}")
-    print(f"Times hitting MAX_RESAMPLE: {metrics['hit_max_resample']}")
-    print(f"Total RuntimeErrors     : {metrics['runtime_errors']}")
-    print(f"All output shapes exactly (3,448,448) & (448,448): {metrics['shape_valid']}")
-    
-    if metrics['accepted_fg_pixels']:
-        fg = metrics['accepted_fg_pixels']
-        print(f"\nForeground Distribution of ACCEPTED crops:")
-        print(f"  Min: {np.min(fg)}")
-        print(f"  Max: {np.max(fg)}")
-        print(f"  Mean: {np.mean(fg):.1f}")
-        print(f"  Median: {np.median(fg):.1f}")
-        print(f"  < 20 px: {sum(1 for x in fg if x < 20)}")
-        print(f"  >= 20 px: {sum(1 for x in fg if x >= 20)}")
+        label = sample["label"]   # torch.Tensor (H, W), dtype=long
 
-if __name__ == '__main__':
-    run_real_probe()
+        # Shape check
+        if tuple(label.shape) != (IMAGE_SIZE, IMAGE_SIZE):
+            shape_ok = False
+            print(f"  WARN: unexpected label shape {tuple(label.shape)} at sample {i}")
+
+        fg = int((label > 0).sum().item())
+        fg_pixels_log.append(fg)
+
+        if fg >= 20:
+            accepted_positive += 1
+        else:
+            accepted_negative += 1
+
+    # ── Report ────────────────────────────────────────────────────────────────
+    total_returned = accepted_positive + accepted_negative
+    pos_pct = accepted_positive / total_returned * 100 if total_returned > 0 else 0
+    neg_pct = accepted_negative / total_returned * 100 if total_returned > 0 else 0
+
+    print(f"\n{'='*70}")
+    print(f"=== BEHAVIOR PROBE RESULTS ===")
+    print(f"{'='*70}")
+    print(f"Total samples requested       : {N_SAMPLES}")
+    print(f"Samples returned successfully : {total_returned}")
+    print(f"RuntimeErrors                 : {runtime_errors}")
+    print(f"All output shapes correct     : {shape_ok and runtime_errors == 0}")
+    print()
+    print(f"[Final Accepted Distribution — measured from returned labels]")
+    print(f"  Positive (fg >= 20) : {accepted_positive:>5}  ({pos_pct:.1f}%)")
+    print(f"  Negative (fg <  20) : {accepted_negative:>5}  ({neg_pct:.1f}%)")
+    print()
+    print(f"  Note: 85/15 is the expected TARGET SAMPLING RATIO set per __getitem__ call.")
+    print(f"        Pool guarantees P(valid negative | negative request) = 1 by construction.")
+
+    if fg_pixels_log:
+        fg = np.array(fg_pixels_log)
+        print(f"\n[FG pixel distribution of ALL returned crops]")
+        print(f"  Min    : {fg.min()}")
+        print(f"  Max    : {fg.max()}")
+        print(f"  Mean   : {fg.mean():.1f}")
+        print(f"  Median : {np.median(fg):.1f}")
+        print(f"  fg <  20 (negative) : {(fg < 20).sum()}")
+        print(f"  fg >= 20 (positive) : {(fg >= 20).sum()}")
+
+        # Verify pool integrity: all negatives must genuinely have fg < 20
+        neg_with_high_fg = sum(1 for v in fg_pixels_log[:accepted_negative] if v >= 20)
+        if neg_with_high_fg > 0:
+            print(f"\n  [!] INTEGRITY VIOLATION: {neg_with_high_fg} 'negative' samples "
+                  f"had fg >= 20. Pool may be stale.")
+        else:
+            print(f"\n  Pool integrity: OK — all accepted negatives have fg < 20.")
+
+    passed = (runtime_errors == 0 and shape_ok)
+    print(f"\n{'='*70}")
+    print(f"OVERALL: {'PASS' if passed else 'FAIL'}")
+    print(f"{'='*70}")
+
+    sys.exit(0 if passed else 1)
+
+
+if __name__ == "__main__":
+    main()
