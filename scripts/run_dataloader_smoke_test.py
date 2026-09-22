@@ -136,6 +136,7 @@ def run_test(num_workers):
         print(f"\n[!] FAILED at batch {total_batches}!")
         print(f"Exception Message: {e}")
         traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == '__main__':
     # Run num_workers=4 first (reproduce training failure)
