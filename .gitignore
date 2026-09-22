@@ -206,5 +206,3 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Negative pool artifacts (generated offline, never commit)
-*.npz

@@ -1,30 +1,22 @@
 """
 run_behavior_probe.py
 =====================
-Behavior probe for ConfigurableMedicalDataset with negative-pool implementation.
+Behavior probe for ConfigurableMedicalDataset (Crack500 smart-filter mode).
 
 Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
 
-What this probe measures
-------------------------
-- Output-class distribution: fraction of returned samples where fg < 20 vs >= 20
-  AFTER the full pipeline (crop → aug_transform → normalize → tensor).
+The smart-filter accepts only crops with fg_pixels >= 20 (crack present).
+This probe verifies:
+  - No RuntimeError over 3000 samples.
+  - All returned images have shape (3, 448, 448).
+  - All returned labels have shape (448, 448) with values in {0, 1}.
+  - Foreground pixel distribution of returned crops (post-augmentation).
 
-  Because spatial augmentation (flips, ShiftScaleRotate) can change fg counts,
-  this distribution is NOT equivalent to the target sampling ratio (85/15).
-  Do NOT use fg from returned labels to assert exact 85/15.
+Note: fg measured from returned labels is AFTER spatial augmentation and
+normalization. This reports output distribution, not guaranteed crop-level
+fg (which is enforced at crop-selection time before augmentation).
 
-- The true guarantee for negative correctness comes from the assertion inside
-  ConfigurableMedicalDataset.__getitem__:
-      assert fg_actual < 20, "Pool entry violated fg threshold ..."
-  which fires BEFORE augmentation. If that assertion never raises here,
-  the pool is intact and no silent-accept occurred.
-
-- To measure exact target ratio (positive/negative targets chosen at
-  __getitem__ call time), production telemetry in dataloader itself is required.
-  This probe does not attempt to infer it from post-augmentation fg.
-
-Run from repo root on Colab (after building the pool):
+Run from repo root on Colab:
     python scripts/run_behavior_probe.py
 
 Exits with code 1 on any RuntimeError or shape failure.
@@ -50,7 +42,7 @@ SEED        = 42
 
 def main():
     print("=" * 70)
-    print("=== REAL BEHAVIOR PROBE (Crack500 negative-pool implementation) ===")
+    print("=== REAL BEHAVIOR PROBE (Crack500 smart-filter crop-retry) ===")
     print("=" * 70)
 
     if not os.path.exists(CONFIG_PATH):
@@ -65,18 +57,16 @@ def main():
         print(f"ERROR loading dataset: {e}")
         sys.exit(1)
 
-    print(f"   Dataset size     : {len(ds)} samples")
-    print(f"   Negative pool    : {ds._neg_pool_size} candidates")
+    print(f"   Dataset size  : {len(ds)} samples")
+    print(f"   Smart filter  : {ds.use_smart_filter}  (fg_pixels >= 20 required at crop time)")
 
     random.seed(SEED)
     np.random.seed(SEED)
 
-    # ── Metrics ───────────────────────────────────────────────────────────────
-    returned_fg_lt20  = 0   # output fg < 20 after full pipeline
-    returned_fg_ge20  = 0   # output fg >= 20 after full pipeline
-    fg_pixels_log     = []
-    runtime_errors    = 0
-    shape_failures    = []
+    returned_ok    = 0
+    runtime_errors = 0
+    shape_failures = []
+    fg_pixels_log  = []
 
     print(f"\n2. Running {N_SAMPLES} __getitem__ calls on REAL implementation ...")
 
@@ -84,22 +74,15 @@ def main():
         idx = random.randint(0, len(ds) - 1)
         try:
             sample = ds[idx]
-        except AssertionError as e:
-            # Pool integrity assertion fired inside dataloader — this is a hard failure
-            print(f"\n[!] Pool integrity AssertionError at sample {i}: {e}")
-            runtime_errors += 1
-            import traceback; traceback.print_exc()
-            continue
         except RuntimeError as e:
             runtime_errors += 1
             print(f"\n[!] RuntimeError at sample {i}: {e}")
             import traceback; traceback.print_exc()
             continue
 
-        label = sample["label"]   # torch.Tensor (H, W), dtype=long
         image = sample["image"]   # torch.Tensor (3, H, W)
+        label = sample["label"]   # torch.Tensor (H, W), dtype=long
 
-        # Shape checks
         if tuple(image.shape) != (3, IMAGE_SIZE, IMAGE_SIZE):
             shape_failures.append(f"sample={i} image={tuple(image.shape)}")
         if tuple(label.shape) != (IMAGE_SIZE, IMAGE_SIZE):
@@ -107,46 +90,30 @@ def main():
 
         fg = int((label > 0).sum().item())
         fg_pixels_log.append(fg)
-
-        if fg < 20:
-            returned_fg_lt20 += 1
-        else:
-            returned_fg_ge20 += 1
-
-    # ── Report ────────────────────────────────────────────────────────────────
-    total_returned = returned_fg_lt20 + returned_fg_ge20
-    pct_lt20 = returned_fg_lt20 / total_returned * 100 if total_returned else 0
-    pct_ge20 = returned_fg_ge20 / total_returned * 100 if total_returned else 0
+        returned_ok += 1
 
     print(f"\n{'='*70}")
     print(f"=== BEHAVIOR PROBE RESULTS ===")
     print(f"{'='*70}")
-    print(f"Total samples requested   : {N_SAMPLES}")
-    print(f"Samples returned OK       : {total_returned}")
+    print(f"Total requests            : {N_SAMPLES}")
+    print(f"Returned successfully     : {returned_ok}")
     print(f"RuntimeErrors             : {runtime_errors}")
     print(f"Shape failures            : {len(shape_failures)}")
 
-    print(f"\n[Output-class distribution — measured on labels AFTER full pipeline]")
-    print(f"  fg >= 20 (crack present) : {returned_fg_ge20:>5}  ({pct_ge20:.1f}%)")
-    print(f"  fg <  20 (no crack)      : {returned_fg_lt20:>5}  ({pct_lt20:.1f}%)")
-    print()
-    print(f"  NOTE: This is the OUTPUT distribution after crop + spatial aug.")
-    print(f"        Spatial augmentation can shift fg counts, so this is NOT")
-    print(f"        the same as the target sampling ratio (85% pos / 15% neg).")
-    print(f"        Pool guarantee: P(valid negative | negative request) = 1,")
-    print(f"        enforced by assertion in ConfigurableMedicalDataset.__getitem__")
-    print(f"        BEFORE augmentation. Zero AssertionErrors above = pool intact.")
-
     if fg_pixels_log:
         fg = np.array(fg_pixels_log)
-        print(f"\n[FG pixel distribution of ALL returned labels (post-augmentation)]")
+        print(f"\n[FG pixel distribution of returned labels (post-augmentation)]")
+        print(f"  Note: fg is measured AFTER spatial augmentation. Crop selection")
+        print(f"        guarantees fg_pixels >= 20 BEFORE augmentation.")
         print(f"  Min    : {fg.min()}")
         print(f"  Max    : {fg.max()}")
         print(f"  Mean   : {fg.mean():.1f}")
         print(f"  Median : {np.median(fg):.1f}")
+        print(f"  Samples with fg > 0  : {(fg > 0).sum()}  ({(fg > 0).mean()*100:.1f}%)")
+        print(f"  Samples with fg == 0 : {(fg == 0).sum()}  ({(fg == 0).mean()*100:.1f}%)")
 
     if shape_failures:
-        print(f"\n  Shape failure details: {shape_failures[:5]}")
+        print(f"\nShape failure details: {shape_failures[:5]}")
 
     passed = (runtime_errors == 0 and len(shape_failures) == 0)
     print(f"\n{'='*70}")

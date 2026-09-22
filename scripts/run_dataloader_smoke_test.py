@@ -1,11 +1,15 @@
 """
 run_dataloader_smoke_test.py
 ============================
-Smoke test for ConfigurableMedicalDataset with negative-pool implementation.
+Smoke test for ConfigurableMedicalDataset (Crack500 smart-filter mode).
 
 Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
 
-Run from repo root on Colab (after building the pool):
+The smart-filter rejects crops with fg_pixels < 20 and resamples source
+up to 10 times (20 crop attempts each). This test verifies the pipeline
+runs cleanly without RuntimeError across 200 batches.
+
+Run from repo root on Colab:
     python scripts/run_dataloader_smoke_test.py
 
 Exits with code 1 on any failure.
@@ -38,9 +42,7 @@ def seed_worker(worker_id):
 
 
 def run_smoke(num_workers: int) -> bool:
-    """
-    Returns True if all batches pass, False (and prints traceback) otherwise.
-    """
+    """Returns True if all batches pass; False on any error."""
     print(f"\n{'='*70}")
     print(f"=== SMOKE TEST  num_workers={num_workers} ===")
     print(f"{'='*70}")
@@ -56,8 +58,8 @@ def run_smoke(num_workers: int) -> bool:
         print(f"ERROR loading dataset: {e}")
         return False
 
-    print(f"Dataset size: {len(ds)} samples")
-    print(f"Negative pool size: {ds._neg_pool_size} candidates")
+    print(f"Dataset size  : {len(ds)} samples")
+    print(f"Smart filter  : {ds.use_smart_filter}  (fg_pixels >= 20 required)")
 
     g = torch.Generator()
     g.manual_seed(SEED)
@@ -72,9 +74,8 @@ def run_smoke(num_workers: int) -> bool:
         drop_last=False,
     )
 
-    passed_batches  = 0
-    passed_samples  = 0
-    runtime_errors  = 0
+    passed_batches = 0
+    runtime_errors = 0
     shape_failures  = []
     label_failures  = []
 
@@ -85,7 +86,6 @@ def run_smoke(num_workers: int) -> bool:
             images = batch["image"]   # (B, 3, H, W)
             labels = batch["label"]   # (B, H, W)
 
-            # Shape checks
             for b in range(images.shape[0]):
                 if tuple(images[b].shape) != (3, IMAGE_SIZE, IMAGE_SIZE):
                     shape_failures.append(
@@ -95,7 +95,6 @@ def run_smoke(num_workers: int) -> bool:
                     shape_failures.append(
                         f"batch={batch_idx} sample={b} label={tuple(labels[b].shape)}"
                     )
-                # Label value check: must be 0 or 1
                 unique_vals = labels[b].unique().tolist()
                 for v in unique_vals:
                     if v not in (0, 1):
@@ -104,8 +103,6 @@ def run_smoke(num_workers: int) -> bool:
                         )
 
             passed_batches += 1
-            passed_samples += images.shape[0]
-
             if batch_idx >= N_BATCHES:
                 break
 
@@ -114,23 +111,21 @@ def run_smoke(num_workers: int) -> bool:
         print(f"\n[!] RuntimeError at batch {passed_batches + 1}: {e}")
         import traceback; traceback.print_exc()
 
-    # ── Report ────────────────────────────────────────────────────────────────
     print(f"\n--- RESULTS (num_workers={num_workers}) ---")
     print(f"Batches passed    : {passed_batches} / {N_BATCHES}")
-    print(f"Samples passed    : {passed_samples}")
     print(f"RuntimeErrors     : {runtime_errors}")
     print(f"Shape failures    : {len(shape_failures)}")
     print(f"Label failures    : {len(label_failures)}")
+
+    if shape_failures:
+        print("  Shape details:", shape_failures[:5])
+    if label_failures:
+        print("  Label details:", label_failures[:5])
 
     ok = (runtime_errors == 0 and
           len(shape_failures) == 0 and
           len(label_failures) == 0 and
           passed_batches >= N_BATCHES)
-
-    if shape_failures:
-        print("Shape failure details:", shape_failures[:5])
-    if label_failures:
-        print("Label failure details:", label_failures[:5])
 
     print(f"\n{'PASS' if ok else 'FAIL'} — num_workers={num_workers}")
     return ok
@@ -138,11 +133,7 @@ def run_smoke(num_workers: int) -> bool:
 
 def main():
     overall_ok = True
-
-    # Phase 1: multi-worker (reproduce training conditions)
     overall_ok &= run_smoke(num_workers=4)
-
-    # Phase 2: single process (isolate multiprocessing vs policy)
     overall_ok &= run_smoke(num_workers=0)
 
     print(f"\n{'='*70}")

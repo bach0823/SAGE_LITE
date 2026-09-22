@@ -12,10 +12,6 @@ mask_suffix: ""
 smart_filter: true
 crop_mode: "random"
 
-# Negative candidate pool — built offline by scripts/build_negative_pool.py.
-# On Colab set root_dir to /content/dataset/Crack500 and pool path accordingly.
-negative_pool_path: "/content/dataset/Crack500/negative_pool.npz"
-
 # root_dir for local dev; override on Colab:
 #   root_dir: "/content/dataset/Crack500"
 root_dir: "temp_data/dataset/Crack500"
