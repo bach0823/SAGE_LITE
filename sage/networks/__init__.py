@@ -1,10 +1,11 @@
-﻿from .convnextv2_vit_hybrid import (
+from .convnextv2_vit_hybrid import (
     ConvNeXtV2ViTHybrid,
     create_convnextv2_vit_hybrid,
 )
 from .decoder_block import DecoderBlock, UNetDecoder
 from .b0_unet import B0ConvNeXtUNet, create_b0_unet
 from .b1_unet import B1ConvNeXtViTUNet, create_b1_unet
+from .b2_unet import B2ConvNeXtViTUNet, create_b2_unet
 from .sage_injection import inject_sage_layers, pre_populate_sa_hubs
 from .wrappers import TupleSafeWrapper, extract_convnext_blocks
 
@@ -17,6 +18,8 @@ __all__ = [
     "create_b0_unet",
     "B1ConvNeXtViTUNet",
     "create_b1_unet",
+    "B2ConvNeXtViTUNet",
+    "create_b2_unet",
     "inject_sage_layers",
     "pre_populate_sa_hubs",
     "TupleSafeWrapper",

@@ -192,15 +192,13 @@ class SageRouter(nn.Module):
         else:  # Fallback for other formats
             aggregated = x.flatten(1)
         
-        # Step 2: Handle channel mismatch with adaptive projection
+        # Step 2: Verify channel dimension matches self.in_channels (no dynamic parameter creation)
         actual_channels = aggregated.shape[1]
         if actual_channels != self.in_channels:
-            if self.adaptive_projection is None:
-                self.adaptive_projection = nn.Linear(
-                    actual_channels,
-                    self.in_channels
-                ).to(x.device)
-            aggregated = self.adaptive_projection(aggregated)
+            raise ValueError(
+                f"Input channel mismatch in SageRouter: expected in_channels={self.in_channels}, "
+                f"got {actual_channels}. Dynamic parameter creation in forward is strictly forbidden."
+            )
         
         return aggregated
     
@@ -231,7 +229,7 @@ class SageRouter(nn.Module):
         self.total_calls += 1
         B = input_tensor.shape[0]
         
-        # Step 1: Aggregate and adapt input features
+        # Step 1: Aggregate input features
         aggregated_features = self._aggregate_features_with_adaptation(input_tensor)
         
         # Step 2: Compute shared expert gate (g_s) - SAGE Eq. 6
@@ -249,15 +247,20 @@ class SageRouter(nn.Module):
             base_logits = base_logits + noise
 
         # Step 4: Logit modulation using hierarchical gating - SAGE Eq. 8
+        # SAGE-Lite stability fix: compute in FP32 with eps=1e-5 to prevent underflow/NaN under AMP FP16
         if self.logit_modulation:
-            eps = 1e-9
-            log_g_s = torch.log(g_s + eps)
-            log_one_minus_g_s = torch.log(1 - g_s + eps)
+            eps = 1e-5
+            orig_dtype = base_logits.dtype
+            g_s_f32 = g_s.float()
+            g_s_clamped = torch.clamp(g_s_f32, min=eps, max=1.0 - eps)
+            log_g_s = torch.log(g_s_clamped)
+            log_one_minus_g_s = torch.log(1.0 - g_s_clamped)
+            mask_f32 = self.shared_mask.float()
             modulated_logits = (
-                base_logits +
-                self.shared_mask * log_g_s +
-                (1 - self.shared_mask) * log_one_minus_g_s
-            )
+                base_logits.float() +
+                mask_f32 * log_g_s +
+                (1.0 - mask_f32) * log_one_minus_g_s
+            ).to(orig_dtype)
         else:
             modulated_logits = base_logits
 

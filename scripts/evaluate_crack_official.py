@@ -12,7 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from sage.networks import create_b0_unet, create_b1_unet
+from sage.networks import create_b0_unet, create_b1_unet, create_b2_unet
 from sage.utils.training_utils import set_seed
 from scripts.train_crack import CrackBinaryLoss
 
@@ -347,6 +347,11 @@ def main():
         vit_depth = int(config.get('num_transformer_layers', 6))
         model = create_b1_unet(num_transformer_layers=vit_depth, pretrained=False).to(device)
         print(f"Loaded B1 architecture with {vit_depth} ViT blocks")
+    elif model_type == 'B2':
+        vit_depth = int(config.get('num_transformer_layers', 12))
+        sage_cfg = config.get('sage_config', {})
+        model = create_b2_unet(num_transformer_layers=vit_depth, pretrained=False, sage_config=sage_cfg).to(device)
+        print(f"Loaded B2 architecture with {vit_depth} ViT blocks and SAGE components")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         

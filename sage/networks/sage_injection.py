@@ -62,6 +62,7 @@ def inject_sage_layers(
             router=router,
             sa_hub=sa_hub,
             config=sage_layer_config,
+            my_index=stage_idx,
         )
 
         convnext.stages[stage_idx] = sage_wrapper
@@ -82,6 +83,7 @@ def inject_sage_layers(
             router=router,
             sa_hub=sa_hub,
             config=sage_layer_config,
+            my_index=len(convnext.stages) + layer_idx,
         )
 
         transformer_blocks[layer_idx] = sage_wrapper
@@ -97,8 +99,16 @@ def inject_sage_layers(
         expert_pool.append(block_wrapper.main_block)
     logger.info("  - Added %s Transformer main_blocks to pool.", len(transformer_blocks))
 
+    # Link expert_pool into all SageLayer wrappers for forward pass
+    for stage_wrapper in convnext.stages:
+        if isinstance(stage_wrapper, SageLayer):
+            stage_wrapper.expert_pool = expert_pool
+    for block_wrapper in transformer_blocks:
+        if isinstance(block_wrapper, SageLayer):
+            block_wrapper.expert_pool = expert_pool
+
     logger.info(
-        "\n\u2713 Built expert pool with %s experts, all referencing active .main_block modules.",
+        "\n\u2713 Built expert pool with %s experts, linked to all SageLayer instances.",
         len(expert_pool),
     )
     logger.info("=" * 80)

@@ -15,27 +15,33 @@ if project_root not in sys.path:
 
 import time
 
-from sage.networks import create_b0_unet, create_b1_unet
+from sage.networks import create_b0_unet, create_b1_unet, create_b2_unet
 from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 
-def get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05):
+def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, weight_decay=0.05):
+    if lr_sage is None:
+        lr_sage = lr_decoder
+
     optimizer_groups = []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
             
-        if 'LayerNorm' in name or name.endswith('.bias'):
+        if 'LayerNorm' in name or 'norm' in name.lower() or name.endswith('.bias'):
             wd = 0.0
         else:
             wd = weight_decay
             
-        if name.startswith('backbone'):
-            lr = lr_backbone
-            group_name = 'backbone'
-        else:
+        if 'router' in name or 'sa_hub' in name:
+            lr = lr_sage
+            group_name = 'sage'
+        elif name.startswith('decoder'):
             lr = lr_decoder
             group_name = 'decoder'
+        else:
+            lr = lr_backbone
+            group_name = 'backbone'
             
         optimizer_groups.append({
             'params': [param],
@@ -109,6 +115,11 @@ def main(args):
     logger.info(f"Loaded config from {config_path}")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        dev_name = torch.cuda.get_device_name(0)
+        if '1650' in dev_name or '1660' in dev_name:
+            torch.backends.cudnn.enabled = False
+            logger.info(f"Detected {dev_name}. Set torch.backends.cudnn.enabled = False for FP16 numerical stability.")
     logger.info(f"Using device: {device}")
     
     img_size = config.get('img_size', 448)
@@ -142,6 +153,15 @@ def main(args):
         vit_depth = int(config.get('num_transformer_layers', 6))
         model = create_b1_unet(num_transformer_layers=vit_depth, pretrained=True).to(device)
         logger.info(f"Loaded B1 with {vit_depth} ViT blocks")
+    elif model_type == 'B2':
+        vit_depth = int(config.get('num_transformer_layers', 12))
+        sage_cfg = config.get('sage_config', {})
+        model = create_b2_unet(
+            num_transformer_layers=vit_depth,
+            pretrained=True,
+            sage_config=sage_cfg
+        ).to(device)
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks and full SAGE-Lite injection")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         
@@ -152,6 +172,7 @@ def main(args):
     base_lr = float(config.get('lr', 1e-4))
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
+    lr_sage = base_lr
     
     two_stage = getattr(args, 'two_stage', False) or config.get('two_stage', False)
     
@@ -161,7 +182,7 @@ def main(args):
         patience = int(config.get('patience', 6))
         logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}")
         
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05)
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
         scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=3)
         
@@ -172,6 +193,7 @@ def main(args):
         for epoch in range(1, total_epochs + 1):
             model.train()
             train_loss = 0.0
+            train_lb_loss = 0.0
             train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
             
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs} [Train]")
@@ -182,14 +204,23 @@ def main(args):
                 optimizer.zero_grad(set_to_none=True)
                 
                 with torch.amp.autocast('cuda'):
-                    logits = model(images)
-                    loss = criterion(logits, labels)
+                    if hasattr(model, 'forward_with_routing_info'):
+                        forward_out = model.forward_with_routing_info(images)
+                        logits = forward_out['logits']
+                        routing_infos = forward_out['routing_infos']
+                        lb_loss = model.compute_total_load_balance_loss(routing_infos)
+                    else:
+                        logits = model(images)
+                        lb_loss = torch.tensor(0.0, device=device)
+                    seg_loss = criterion(logits, labels)
+                    loss = seg_loss + 1.0 * lb_loss
                     
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 
                 train_loss += loss.item()
+                train_lb_loss += lb_loss.item()
                 with torch.no_grad():
                     probs = torch.sigmoid(logits)
                     acc, dice, iou = calculate_binary_metrics(probs, labels)
@@ -197,7 +228,7 @@ def main(args):
                     train_dice += dice
                     train_iou += iou
                     
-                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}"})
+                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}", 'lb': f"{lb_loss.item():.4f}"})
                 
             scheduler.step(epoch)
             
@@ -210,10 +241,15 @@ def main(args):
             
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
+            train_lb_loss /= len(train_loader)
             
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
-            logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
+            sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
+            lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
+            if sage_lr is not None:
+                lr_str += f", SAGE={sage_lr:.2e}"
+            logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
             is_best = False
             if val_dice > best_dice + 1e-4:
@@ -228,23 +264,35 @@ def main(args):
                 epochs_no_improve = 0
                 
                 ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}.pth")
-                torch.save({
+                save_dict = {
                     'epoch': int(epoch),
                     'model_state_dict': model.state_dict(),
                     'best_dice': float(best_dice),
                     'best_loss': float(best_loss),
-                }, ckpt_path)
+                    'model_type': model_type,
+                }
+                if model_type in ['B1', 'B2']:
+                    save_dict['num_transformer_layers'] = vit_depth
+                if model_type == 'B2':
+                    save_dict['sage_config'] = sage_cfg
+                torch.save(save_dict, ckpt_path)
                 logger.info(f"*** New BEST model saved with Val Dice: {best_dice:.4f}, Val Loss: {best_loss:.4f} ***")
             else:
                 epochs_no_improve += 1
                 
             last_ckpt_path = os.path.join(output_dir, f"last_model_{model_type.lower()}.pth")
-            torch.save({
+            last_save_dict = {
                 'epoch': int(epoch),
                 'model_state_dict': model.state_dict(),
                 'val_dice': float(val_dice),
                 'val_loss': float(val_loss),
-            }, last_ckpt_path)
+                'model_type': model_type,
+            }
+            if model_type in ['B1', 'B2']:
+                last_save_dict['num_transformer_layers'] = vit_depth
+            if model_type == 'B2':
+                last_save_dict['sage_config'] = sage_cfg
+            torch.save(last_save_dict, last_ckpt_path)
             
             if epochs_no_improve >= patience:
                 logger.info(f"EarlyStopping triggered at epoch {epoch} (Patience: {patience})")
@@ -305,7 +353,7 @@ def main(args):
             else:
                 logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
         
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, weight_decay=0.05)
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
         scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=3)
         
@@ -318,6 +366,7 @@ def main(args):
             actual_epochs_this_stage = epoch
             model.train()
             train_loss = 0.0
+            train_lb_loss = 0.0
             train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
             
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{max_stage_epochs} [Train]")
@@ -328,14 +377,23 @@ def main(args):
                 optimizer.zero_grad(set_to_none=True)
                 
                 with torch.amp.autocast('cuda'):
-                    logits = model(images)
-                    loss = criterion(logits, labels)
+                    if hasattr(model, 'forward_with_routing_info'):
+                        forward_out = model.forward_with_routing_info(images)
+                        logits = forward_out['logits']
+                        routing_infos = forward_out['routing_infos']
+                        lb_loss = model.compute_total_load_balance_loss(routing_infos)
+                    else:
+                        logits = model(images)
+                        lb_loss = torch.tensor(0.0, device=device)
+                    seg_loss = criterion(logits, labels)
+                    loss = seg_loss + 1.0 * lb_loss
                     
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 
                 train_loss += loss.item()
+                train_lb_loss += lb_loss.item()
                 with torch.no_grad():
                     probs = torch.sigmoid(logits)
                     acc, dice, iou = calculate_binary_metrics(probs, labels)
@@ -343,7 +401,7 @@ def main(args):
                     train_dice += dice
                     train_iou += iou
                     
-                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}"})
+                pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}", 'lb': f"{lb_loss.item():.4f}"})
                 
             scheduler.step(epoch)
             
@@ -356,10 +414,15 @@ def main(args):
             
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
+            train_lb_loss /= len(train_loader)
             
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
-            logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f}, Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: BB={bb_lr:.2e}, Dec={dec_lr:.2e}")
+            sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
+            lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
+            if sage_lr is not None:
+                lr_str += f", SAGE={sage_lr:.2e}"
+            logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
             is_best_stage = False
             if val_dice > best_stage_dice + 1e-4:

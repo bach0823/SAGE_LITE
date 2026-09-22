@@ -1,0 +1,36 @@
+model: B2
+num_transformer_layers: 6
+seed: 42
+img_size: 448
+batch_size: 20
+num_workers: 4
+epochs: 30
+patience: 6
+lr: 1e-4
+output_dir: "/content/drive/MyDrive/crack_seg/B2_Crack500_Depth6"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+sage_config:
+  top_k: 4
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+
+root_dir: "/content/dataset/Crack500"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"

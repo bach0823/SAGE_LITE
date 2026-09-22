@@ -43,26 +43,34 @@ class SageLayer(nn.Module):
         main_block: nn.Module,
         router: SageRouter,
         sa_hub: SAHub,
-        alpha: float = 0.9,
-        expert_dropout: float = 0.0
+        expert_dropout: float = 0.0,
+        my_index: Optional[int] = None,
+        expert_pool: Optional[nn.ModuleList] = None,
+        alpha: Optional[float] = None,
+        residual_scale: float = 0.1,
     ):
         """
-        Initialize SAGE Layer.
+        Initialize SAGE Layer for SAGE-Lite.
         
         Args:
-            main_block: Original block being wrapped (e.g., ResNet/Transformer block)
+            main_block: Original block being wrapped (e.g., ConvNeXt stage / Transformer block)
             router: Router for dynamic expert selection (implements SAGE routing)
             sa_hub: Shape-Adapting Hub for tensor format conversion
-            alpha: Initial mixing weight (default: 0.9, range: [0.1, 1.0])
-                  Higher values favor main path, lower values favor expert path
             expert_dropout: Dropout rate applied to expert path output (default: 0.0)
+            my_index: Index of this layer in the expert pool for zero-cost self-selection bypass
+            expert_pool: Optional reference to the shared expert pool
+            alpha: Deprecated in SAGE-Lite (pure residual fusion: main + adapter is used)
+            residual_scale: Scaling factor for residual expert path (default: 0.1) to preserve
+                stability and numerical range under AMP FP16 across deep networks.
         """
         super().__init__()
         self.main_block = main_block
         self.router = router
         self.sa_hub = sa_hub
+        self.my_index = my_index
+        self.expert_pool = expert_pool
+        self.residual_scale = residual_scale
         
-        self.alpha = nn.Parameter(torch.tensor(alpha))
         self.expert_dropout = (
             nn.Dropout(expert_dropout) if expert_dropout > 0 else nn.Identity()
         )
@@ -70,55 +78,66 @@ class SageLayer(nn.Module):
         self.register_buffer('forward_calls', torch.tensor(0))
         self.register_buffer('expert_successes', torch.tensor(0))
 
-        # Stores the load_balance_loss from the most recent forward pass
-        # so the training loop can collect it without a second forward pass
+        # Cached outputs from the most recent forward pass (Tensor Contract)
         self._last_lb_loss: Optional[torch.Tensor] = None
+        self._last_routing_info: Optional[Dict[str, Any]] = None
 
         self.logger = logging.getLogger(self.__class__.__name__)
         
     def forward(
         self,
         x: torch.Tensor,
-        expert_pool: nn.ModuleList
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        expert_pool: Optional[nn.ModuleList] = None
+    ) -> torch.Tensor:
         """
+        SAGE Layer forward pass obeying Strict Tensor Contract.
+        
+        Flow:
             1. Main Path: x -> main_block -> main_output
             2. Expert Path: x -> router -> experts (via SA-Hub) -> expert_output
-            3. Combination: alpha * main_output + (1-alpha) * expert_output
+            3. Pure Residual Fusion: main_output + Dropout(expert_output)
+            4. Cache routing_info internally for forward_with_routing_info collection.
         
         Args:
             x: Input tensor of shape (B, C, H, W) or (B, N, D)
-            expert_pool: ModuleList containing all available expert modules
+            expert_pool: Optional ModuleList of experts. If None, uses self.expert_pool.
             
         Returns:
-            Tuple containing:
-                - final_output: Combined output tensor (same shape as main_output)
-                - routing_info: Dictionary with routing statistics and metadata
+            torch.Tensor: final_output (pure Tensor, ensuring unbroken backbone flow)
         """
         self.forward_calls += 1
+        pool = expert_pool if expert_pool is not None else self.expert_pool
+        if pool is None:
+            raise ValueError(
+                f"expert_pool is not provided and not set on SageLayer (my_index={self.my_index})"
+            )
         
         # Step 1: Execute main processing path
         main_output = self._execute_main_path(x)
         
         # Step 2: Execute expert processing path
         expert_output, routing_info = self._execute_expert_path(
-            x, main_output, expert_pool
+            x, main_output, pool
         )
         
-        # Step 3: Combine paths with clamped alpha
-        alpha = torch.clamp(self.alpha, 0.1, 1.0)
-        final_output = alpha * main_output + (1 - alpha) * expert_output
+        # Step 3: Pure Residual Fusion (SAGE-Lite design lock: NO alpha)
+        final_output = main_output + self.expert_dropout(self.residual_scale * expert_output)
         
-        # Step 4: Update routing statistics
+        # Step 4: Update and cache routing statistics internally (Tensor Contract)
         routing_info.update({
             'forward_call_count': self.forward_calls.item(),
-            'alpha': alpha.item(),
             'expert_success_rate': (
                 self.expert_successes / max(self.forward_calls, 1)
-            ).item()
+            ).item(),
+            'my_index': self.my_index,
         })
+        self._last_routing_info = routing_info
         
-        return final_output, routing_info
+        return final_output
+
+    def get_last_routing_info(self) -> Optional[Dict[str, Any]]:
+        """Retrieve routing info cached from the most recent forward pass."""
+        return self._last_routing_info
 
     def _execute_main_path(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -197,24 +216,28 @@ class SageLayer(nn.Module):
                 # Get original batch indices for this expert's inputs
                 original_batch_indices = batch_map[expert_mask]
                 
-                # Step 4a: Adapt input tensor shape for this expert
-                adapted_input, _ = self.sa_hub.adapt(
-                    x[original_batch_indices],
-                    expert
-                )
-                
-                # Step 4b: Execute expert forward pass
-                expert_raw_output = expert(adapted_input)
-                if isinstance(expert_raw_output, tuple):
-                    expert_raw_output = expert_raw_output[0]
-                
-                # Step 4c: Adapt expert output to match main path shape
-                main_path_shape_subset = main_output[original_batch_indices].shape
-                adapted_expert_output, _ = self.sa_hub.adapt(
-                    expert_raw_output,
-                    self.main_block,
-                    main_path_shape=main_path_shape_subset
-                )
+                # Zero-cost Self-Selection Bypass
+                if self.my_index is not None and expert_idx == self.my_index:
+                    adapted_expert_output = main_output[original_batch_indices]
+                else:
+                    # Step 4a: Adapt input tensor shape for this expert
+                    adapted_input, _ = self.sa_hub.adapt(
+                        x[original_batch_indices],
+                        expert
+                    )
+                    
+                    # Step 4b: Execute expert forward pass
+                    expert_raw_output = expert(adapted_input)
+                    if isinstance(expert_raw_output, tuple):
+                        expert_raw_output = expert_raw_output[0]
+                    
+                    # Step 4c: Adapt expert output to match main path shape
+                    main_path_shape_subset = main_output[original_batch_indices].shape
+                    adapted_expert_output, _ = self.sa_hub.adapt(
+                        expert_raw_output,
+                        self.main_block,
+                        main_path_shape=main_path_shape_subset
+                    )
                 
                 # Step 4d: Apply gating weights (reshape for broadcasting)
                 weights_for_expert = flat_weights[expert_mask]
@@ -225,11 +248,11 @@ class SageLayer(nn.Module):
                 
                 # Step 5: Accumulate weighted outputs to correct batch positions
                 final_expert_output.index_add_(
-                    0, original_batch_indices, weighted_output
+                    0, original_batch_indices, weighted_output.to(final_expert_output.dtype)
                 )
             
             self.expert_successes += 1
-            return self.expert_dropout(final_expert_output), routing_info
+            return final_expert_output, routing_info
             
         except Exception as e:
             self.logger.error(f"Expert path failed: {e}", exc_info=True)
@@ -248,7 +271,8 @@ class SageLayer(nn.Module):
             'success_rate': (
                 self.expert_successes / max(self.forward_calls, 1)
             ).item(),
-            'alpha': self.alpha.item(),
+            'fusion': 'residual',
+            'my_index': self.my_index,
             'router_stats': self.router.get_usage_statistics()
         }
 
@@ -261,7 +285,9 @@ def create_sage_layer(
     main_block: nn.Module,
     router: SageRouter,
     sa_hub: SAHub,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    my_index: Optional[int] = None,
+    expert_pool: Optional[nn.ModuleList] = None,
 ) -> SageLayer:
     """
     Factory function to create a SAGE layer with configuration.
@@ -274,18 +300,12 @@ def create_sage_layer(
         router: Router module for expert selection
         sa_hub: Shape adapter hub for tensor format conversion
         config: Optional configuration dictionary with keys:
-            - 'alpha' (float): Initial mixing weight (default: 0.9)
             - 'expert_dropout' (float): Dropout rate (default: 0.0)
+        my_index: Optional index in the shared expert pool
+        expert_pool: Optional reference to the shared expert pool
     
     Returns:
         Configured SageLayer instance
-        
-    Example:
-        main_block = ResNetBlock(...)
-        router = create_sage_router(...)
-        sa_hub = create_sa_hub()
-        config = {'alpha': 0.85, 'expert_dropout': 0.1}
-        layer = create_sage_layer(main_block, router, sa_hub, config)
     """
     if config is None:
         config = {}
@@ -294,7 +314,9 @@ def create_sage_layer(
         main_block=main_block,
         router=router,
         sa_hub=sa_hub,
-        alpha=config.get('alpha', 0.9),
-        expert_dropout=config.get('expert_dropout', 0.0)
+        expert_dropout=config.get('expert_dropout', 0.0),
+        my_index=my_index,
+        expert_pool=expert_pool,
+        residual_scale=config.get('residual_scale', 0.1),
     )
 
