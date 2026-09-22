@@ -1,4 +1,4 @@
-﻿import json
+import json
 import argparse
 import os
 import sys
@@ -116,8 +116,10 @@ def main(args):
     num_workers = config.get('num_workers', 4)
     
     train_dataset = get_dataset_from_config(config_path, split='train', image_size=img_size)
-    from evaluate_crack_official import get_image_mask_pairs, evaluate_split
+    from evaluate_crack_official import get_image_mask_pairs, evaluate_split, resolve_protocol
     val_pairs = get_image_mask_pairs(config, 'val')
+    eval_protocol = resolve_protocol(config)
+    logger.info(f"Evaluation protocol for validation: {eval_protocol}")
     
     g = torch.Generator()
     g.manual_seed(config.get('seed', 42))
@@ -245,7 +247,7 @@ def main(args):
             
             model.eval()
             with torch.no_grad():
-                val_metrics = evaluate_split(model, val_pairs, device, tile_size=img_size, criterion=criterion, verbose=False)
+                val_metrics = evaluate_split(model, val_pairs, device, protocol=eval_protocol, tile_size=img_size, criterion=criterion, verbose=False)
                 
             val_loss = val_metrics['loss']
             val_dice = val_metrics['dice']

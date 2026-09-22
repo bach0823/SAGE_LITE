@@ -23,20 +23,28 @@ def get_transformations(img_size, crop_mode='random'):
             A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
             A.RandomCrop(width=img_size, height=img_size)
         ]
+        val_crop = [
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
+        ]
     else:
         base_crop = [
             A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
-            A.Resize(img_size, img_size)
+            A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
+        ]
+        val_crop = [
+            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
+            A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
         ]
 
     aug_list = [
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5, border_mode=cv2.BORDER_CONSTANT), 
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.5),
         A.GaussianBlur(blur_limit=3, p=0.3),
+        A.CLAHE(clip_limit=2.0, p=0.5),
+        A.ElasticTransform(alpha=1, sigma=50, p=0.5),
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ]
@@ -45,8 +53,7 @@ def get_transformations(img_size, crop_mode='random'):
     crop_transform = A.Compose(base_crop)
     aug_transform = A.Compose(aug_list)
     
-    val_transforms = A.Compose([
-        A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
+    val_transforms = A.Compose(val_crop + [
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])
@@ -159,6 +166,7 @@ class UniversalMedicalDataset(Dataset):
         
         # Load Mask
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        mask = (mask > 0).astype(np.uint8)
         
         # Apply Transforms
         if self.transform:
@@ -335,6 +343,8 @@ class ConfigurableMedicalDataset(Dataset):
         image  = cv2.imread(sample['image'])
         image  = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask   = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
+        # Binarize mask to {0, 1} before applying transforms
+        mask   = (mask > 0).astype(np.uint8)
 
         if self.transforms:
             augmented = self.transforms(image=image, mask=mask)

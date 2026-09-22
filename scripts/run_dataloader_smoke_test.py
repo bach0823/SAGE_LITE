@@ -42,18 +42,18 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
-def run_smoke(num_workers: int) -> bool:
+def run_smoke(num_workers: int, config_path: str = CONFIG_PATH, split: str = "train") -> bool:
     """Returns True if all batches pass; False on any error."""
     print(f"\n{'='*70}")
-    print(f"=== SMOKE TEST  num_workers={num_workers} ===")
+    print(f"=== SMOKE TEST  num_workers={num_workers}  config={config_path}  split={split} ===")
     print(f"{'='*70}")
 
-    if not os.path.exists(CONFIG_PATH):
-        print(f"ERROR: {CONFIG_PATH} not found. Run from repo root.")
+    if not os.path.exists(config_path):
+        print(f"ERROR: {config_path} not found.")
         return False
 
     try:
-        ds = ConfigurableMedicalDataset(CONFIG_PATH, split="train",
+        ds = ConfigurableMedicalDataset(config_path, split=split,
                                         image_size=IMAGE_SIZE)
     except Exception as e:
         print(f"ERROR loading dataset: {e}")
@@ -64,7 +64,7 @@ def run_smoke(num_workers: int) -> bool:
 
     print(f"Dataset size    : {len(ds)} samples")
     print(f"Expected batches: {expected_batches} (target test: {target_batches})")
-    print(f"Smart filter    : {ds.use_smart_filter}  (fg_pixels >= 20 required)")
+    print(f"Smart filter    : {getattr(ds, 'use_smart_filter', False)}")
 
     g = torch.Generator()
     g.manual_seed(SEED)
@@ -83,6 +83,7 @@ def run_smoke(num_workers: int) -> bool:
     runtime_errors = 0
     shape_failures  = []
     label_failures  = []
+    all_label_vals = set()
 
     try:
         for batch_idx, batch in enumerate(
@@ -101,6 +102,7 @@ def run_smoke(num_workers: int) -> bool:
                         f"batch={batch_idx} sample={b} label={tuple(labels[b].shape)}"
                     )
                 unique_vals = labels[b].unique().tolist()
+                all_label_vals.update(unique_vals)
                 for v in unique_vals:
                     if v not in (0, 1):
                         label_failures.append(
@@ -121,6 +123,7 @@ def run_smoke(num_workers: int) -> bool:
     print(f"RuntimeErrors     : {runtime_errors}")
     print(f"Shape failures    : {len(shape_failures)}")
     print(f"Label failures    : {len(label_failures)}")
+    print(f"Unique label values seen across all batches: {sorted(list(all_label_vals))}")
 
     if shape_failures:
         print("  Shape details:", shape_failures[:5])
@@ -130,6 +133,7 @@ def run_smoke(num_workers: int) -> bool:
     ok = (runtime_errors == 0 and
           len(shape_failures) == 0 and
           len(label_failures) == 0 and
+          all_label_vals.issubset({0, 1}) and
           passed_batches >= target_batches)
 
     print(f"\n{'PASS' if ok else 'FAIL'} — num_workers={num_workers}")
@@ -137,12 +141,22 @@ def run_smoke(num_workers: int) -> bool:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default=CONFIG_PATH)
+    parser.add_argument('--split', type=str, default='train')
+    parser.add_argument('--num-workers', type=int, default=None)
+    args = parser.parse_args()
+
     overall_ok = True
-    overall_ok &= run_smoke(num_workers=4)
-    overall_ok &= run_smoke(num_workers=0)
+    if args.num_workers is not None:
+        overall_ok &= run_smoke(num_workers=args.num_workers, config_path=args.config, split=args.split)
+    else:
+        overall_ok &= run_smoke(num_workers=4, config_path=args.config, split=args.split)
+        overall_ok &= run_smoke(num_workers=0, config_path=args.config, split=args.split)
 
     print(f"\n{'='*70}")
-    print(f"OVERALL: {'PASS' if overall_ok else 'FAIL'}")
+    print(f"OVERALL: {'PASS' if overall_ok else 'FAIL'} ({args.config} [{args.split}])")
     print(f"{'='*70}")
 
     sys.exit(0 if overall_ok else 1)
