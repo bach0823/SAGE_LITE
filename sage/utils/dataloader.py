@@ -1,4 +1,4 @@
-﻿import os
+import os
 import random
 import numpy as np
 import torch
@@ -279,89 +279,163 @@ class ConfigurableMedicalDataset(Dataset):
             self.crop_transform = crop_t if split == 'train' else None
             self.aug_transform = aug_t if split == 'train' else None
 
+        # 6. Load negative candidate pool (train + smart_filter only)
+        #    Pool is built offline by scripts/build_negative_pool.py and must NOT
+        #    be rebuilt inside each DataLoader worker.
+        self.neg_pool = None
+        if split == 'train' and self.use_smart_filter:
+            pool_path = self.config.get('negative_pool_path', None)
+            if pool_path is None:
+                raise ValueError(
+                    "[Crack500] 'negative_pool_path' not set in config. "
+                    "Add it to your YAML and run scripts/build_negative_pool.py first."
+                )
+            if not os.path.exists(pool_path):
+                raise FileNotFoundError(
+                    f"[Crack500] Negative pool not found at '{pool_path}'. "
+                    f"Run scripts/build_negative_pool.py to generate it."
+                )
+            data = np.load(pool_path, allow_pickle=True)
+            self.neg_pool = {
+                'src_idx':   data['src_idx'].astype(np.int32),
+                'crop_x':    data['crop_x'].astype(np.int16),
+                'crop_y':    data['crop_y'].astype(np.int16),
+                'pad_top':   data['pad_top'].astype(np.int16),
+                'pad_left':  data['pad_left'].astype(np.int16),
+                'fg_pixels': data['fg_pixels'].astype(np.int32),
+            }
+            self._neg_pool_size = len(self.neg_pool['src_idx'])
+            print(f"[ConfigurableDataset] Loaded negative pool: "
+                  f"{self._neg_pool_size} candidates from '{pool_path}'")
+
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        MAX_RESAMPLE = 10
         import random
-        
-        # Lock sampling target ONCE per __getitem__ request so source resamples preserve the same target
-        is_positive_target = random.random() < 0.85
-        
-        for source_try in range(MAX_RESAMPLE):
-            sample = self.samples[idx]
-            
-            # Load Image
-            image = cv2.imread(sample['image'])
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # Load Mask
-            mask = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
-            
-            # Force binary mask (0/1) to avoid label out-of-range in CE loss
-            mask = (mask > 0).astype(np.uint8)
-            
-            # Apply Transforms with Smart Filtering for Training (Crack500 Protocol)
-            if self.split == 'train' and self.crop_transform and self.use_smart_filter:
-                # Use the target locked at the start of the request
-                
-                # Protocol: Mốc 20
-                # Fallback: Reject candidate completely and iteratively sample another index.
+
+        # ── Smart-filter path (Crack500 train) ────────────────────────────────
+        if self.split == 'train' and self.crop_transform and self.use_smart_filter:
+
+            # Lock target ONCE per request — preserved across any source resamples
+            is_positive_target = random.random() < 0.85
+
+            # ── NEGATIVE branch: draw directly from pre-built pool ─────────────
+            if not is_positive_target:
+                pool = self.neg_pool
+                i    = random.randint(0, self._neg_pool_size - 1)
+
+                src_idx  = int(pool['src_idx'][i])
+                crop_x   = int(pool['crop_x'][i])
+                crop_y   = int(pool['crop_y'][i])
+                pad_top  = int(pool['pad_top'][i])
+                pad_left = int(pool['pad_left'][i])
+                stored_fg = int(pool['fg_pixels'][i])
+
+                sample = self.samples[src_idx]
+                image  = cv2.imread(sample['image'])
+                image  = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                mask   = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
+                mask   = (mask > 0).astype(np.uint8)
+
+                # Reproduce the exact padded dimensions using BORDER_REFLECT_101
+                img_p  = cv2.copyMakeBorder(image, pad_top,
+                                             max(0, self.image_size - image.shape[0]) - pad_top,
+                                             pad_left,
+                                             max(0, self.image_size - image.shape[1]) - pad_left,
+                                             cv2.BORDER_REFLECT_101)
+                mask_p = cv2.copyMakeBorder(mask,  pad_top,
+                                             max(0, self.image_size - mask.shape[0]) - pad_top,
+                                             pad_left,
+                                             max(0, self.image_size - mask.shape[1]) - pad_left,
+                                             cv2.BORDER_REFLECT_101)
+
+                # Slice at stored coordinates
+                img_crop  = img_p [crop_y:crop_y + self.image_size,
+                                    crop_x:crop_x + self.image_size]
+                mask_crop = mask_p[crop_y:crop_y + self.image_size,
+                                    crop_x:crop_x + self.image_size]
+
+                # Safety assertion — pool must not contain silent accepts
+                fg_actual = int((mask_crop > 0).sum())
+                assert fg_actual < 20, (
+                    f"[Crack500 neg-pool] Pool entry {i} violated fg threshold: "
+                    f"got {fg_actual} >= 20 (stored={stored_fg}). "
+                    f"Pool may be stale — rebuild with scripts/build_negative_pool.py."
+                )
+
+                augmented = self.aug_transform(image=img_crop, mask=mask_crop)
+                image_out = augmented['image']
+                label_out = augmented['mask']
+                if label_out.dtype != torch.long:
+                    label_out = label_out.long()
+                return {
+                    'image':     image_out,
+                    'label':     label_out,
+                    'case_name': sample['case_name'],
+                }
+
+            # ── POSITIVE branch: unchanged crop-retry + source-resample loop ───
+            MAX_RESAMPLE = 10
+            for source_try in range(MAX_RESAMPLE):
+                sample = self.samples[idx]
+
+                image = cv2.imread(sample['image'])
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                mask  = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
+                mask  = (mask > 0).astype(np.uint8)
+
                 success = False
                 for _ in range(20):
-                    cropped = self.crop_transform(image=image, mask=mask)
+                    cropped   = self.crop_transform(image=image, mask=mask)
                     fg_pixels = (cropped['mask'] > 0).sum()
-                    has_crack = fg_pixels >= 20
-                    
-                    if is_positive_target and has_crack:
-                        success = True; break
-                    elif not is_positive_target and not has_crack:
-                        success = True; break
-                        
+                    if fg_pixels >= 20:
+                        success = True
+                        break
+
                 if not success:
                     idx = random.randint(0, len(self.samples) - 1)
                     continue
-                    
-                # Apply spatial/photometric aug + norm + tensor to the valid crop
+
                 augmented = self.aug_transform(image=cropped['image'], mask=cropped['mask'])
-                image = augmented['image']
-                label = augmented['mask']
-                
-                if label.dtype != torch.long:
-                    label = label.long()
-                    
+                image_out = augmented['image']
+                label_out = augmented['mask']
+                if label_out.dtype != torch.long:
+                    label_out = label_out.long()
                 return {
-                    'image': image,
-                    'label': label,
-                    'case_name': sample['case_name']
+                    'image':     image_out,
+                    'label':     label_out,
+                    'case_name': sample['case_name'],
                 }
-                
-            elif self.transforms:
-                augmented = self.transforms(image=image, mask=mask)
-                image = augmented['image']
-                label = augmented['mask']
-                if label.dtype != torch.long:
-                    label = label.long()
-                return {
-                    'image': image,
-                    'label': label,
-                    'case_name': sample['case_name']
-                }
-            else:
-                image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-                label = torch.from_numpy(mask).long()
-                if label.dtype != torch.long:
-                    label = label.long()
-                return {
-                    'image': image,
-                    'label': label,
-                    'case_name': sample['case_name']
-                }
-                
-        # If MAX_RESAMPLE exceeded, FAIL-FAST
-        raise RuntimeError(f"FAIL-FAST: Exceeded {MAX_RESAMPLE} source resampling attempts in dataloader. "
-                           f"Current policy (Crack500 smart filter) is rejecting too many candidates.")
+
+            raise RuntimeError(
+                f"[Crack500 POSITIVE] FAIL-FAST: Exceeded {MAX_RESAMPLE} source resampling "
+                f"attempts. All sampled sources may be empty/background-only images."
+            )
+
+        # ── Standard path (val / test / DeepCrack / no smart_filter) ─────────
+        sample = self.samples[idx]
+        image  = cv2.imread(sample['image'])
+        image  = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask   = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
+
+        if self.transforms:
+            augmented = self.transforms(image=image, mask=mask)
+            image_out = augmented['image']
+            label_out = augmented['mask']
+        else:
+            image_out = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            label_out = torch.from_numpy(mask).long()
+
+        if label_out.dtype != torch.long:
+            label_out = label_out.long()
+        return {
+            'image':     image_out,
+            'label':     label_out,
+            'case_name': sample['case_name'],
+        }
+
+
 
 def get_dataset_from_config(config_path, split='train', image_size=512):
     """Helper to create dataset directly from yaml path"""

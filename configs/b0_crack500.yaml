@@ -1,4 +1,4 @@
-﻿model: B0
+model: B0
 seed: 42
 img_size: 448
 batch_size: 16
@@ -9,8 +9,16 @@ patience: 6
 lr: 1e-4
 output_dir: "/content/drive/MyDrive/crack_seg/B0_Crack500_Run2"
 mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
 
-root_dir: "/content/dataset/Crack500"
+# Negative candidate pool — built offline by scripts/build_negative_pool.py.
+# On Colab set root_dir to /content/dataset/Crack500 and pool path accordingly.
+negative_pool_path: "/content/dataset/Crack500/negative_pool.npz"
+
+# root_dir for local dev; override on Colab:
+#   root_dir: "/content/dataset/Crack500"
+root_dir: "temp_data/dataset/Crack500"
 
 train:
   images: "train/images"
