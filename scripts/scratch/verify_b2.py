@@ -252,6 +252,39 @@ def run_smoke_test():
     print("  [PASS] Test 8: Dynamic depth sweep architecture (Depth 6) verified.")
 
     # =========================================================================
+    # Test 8.5: Fusion Types Verification (Residual vs Adaptive)
+    # =========================================================================
+    print("\n--- [Test 8.5] Fusion Types Verification ---")
+    
+    # 1. Residual Variant
+    model_residual = create_b2_unet(
+        num_classes=1, img_size=448, num_transformer_layers=6, pretrained=False,
+        sage_config={"fusion_type": "residual", "residual_scale": 0.15}
+    )
+    res_info = model_residual.get_model_info()
+    assert res_info['fusion_type'] == "residual"
+    assert res_info['residual_scale'] == 0.15
+    
+    # Verify no alpha parameter and residual_scale is not a parameter
+    res_named_params = dict(model_residual.named_parameters())
+    assert not any('alpha' in name for name in res_named_params.keys()), "Residual variant should not have 'alpha' parameter"
+    assert not any('residual_scale' in name for name in res_named_params.keys()), "residual_scale should not be a parameter"
+    
+    # 2. Adaptive Variant
+    model_adaptive = create_b2_unet(
+        num_classes=1, img_size=448, num_transformer_layers=6, pretrained=False,
+        sage_config={"fusion_type": "adaptive", "adaptive_alpha": 0.8}
+    )
+    adp_info = model_adaptive.get_model_info()
+    assert adp_info['fusion_type'] == "adaptive"
+    
+    adp_named_params = dict(model_adaptive.named_parameters())
+    alpha_params = [name for name in adp_named_params.keys() if 'alpha' in name]
+    assert len(alpha_params) > 0, "Adaptive variant must have 'alpha' parameter in SageLayer"
+    
+    print("  [PASS] Test 8.5: Fusion types (residual/adaptive) correctly configured and parameterized.")
+
+    # =========================================================================
     # Test 9: Checkpoint Save & Load Round-Trip
     # =========================================================================
     print("\n--- [Test 9] Checkpoint Save and Load Integrity ---")
@@ -269,6 +302,7 @@ def run_smoke_test():
             'model_type': 'B2',
             'num_transformer_layers': 12,
             'best_dice': 0.75,
+            'sage_config': model_d12.sage_config,
         }, tmp_path)
         
         # Create fresh model and load

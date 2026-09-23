@@ -48,6 +48,8 @@ class SageLayer(nn.Module):
         expert_pool: Optional[nn.ModuleList] = None,
         alpha: Optional[float] = None,
         residual_scale: float = 0.1,
+        fusion_type: str = "residual",
+        adaptive_alpha: float = 0.9,
     ):
         """
         Initialize SAGE Layer for SAGE-Lite.
@@ -69,7 +71,13 @@ class SageLayer(nn.Module):
         self.sa_hub = sa_hub
         self.my_index = my_index
         self.expert_pool = expert_pool
-        self.residual_scale = residual_scale
+        self.fusion_type = fusion_type
+        if self.fusion_type == "adaptive":
+            self.alpha = nn.Parameter(torch.tensor(adaptive_alpha))
+        elif self.fusion_type == "residual":
+            self.residual_scale = float(residual_scale)
+        else:
+            raise ValueError(f"Unknown fusion type: {self.fusion_type}")
         
         self.expert_dropout = (
             nn.Dropout(expert_dropout) if expert_dropout > 0 else nn.Identity()
@@ -120,8 +128,12 @@ class SageLayer(nn.Module):
             x, main_output, pool
         )
         
-        # Step 3: Pure Residual Fusion (SAGE-Lite design lock: NO alpha)
-        final_output = main_output + self.expert_dropout(self.residual_scale * expert_output)
+        # Step 3: Fusion
+        if self.fusion_type == "adaptive":
+            alpha = torch.clamp(self.alpha, 0.1, 1.0)
+            final_output = alpha * main_output + (1.0 - alpha) * self.expert_dropout(expert_output)
+        else:
+            final_output = main_output + self.expert_dropout(self.residual_scale * expert_output)
         
         # Step 4: Update and cache routing statistics internally (Tensor Contract)
         routing_info.update({
@@ -131,6 +143,8 @@ class SageLayer(nn.Module):
             ).item(),
             'my_index': self.my_index,
         })
+        if self.fusion_type == "adaptive":
+            routing_info['alpha'] = self.alpha.item()
         self._last_routing_info = routing_info
         
         return final_output
@@ -271,16 +285,19 @@ class SageLayer(nn.Module):
     # ========================================================================
 
     def get_stats(self) -> Dict[str, Any]:
-        return {
+        stats = {
             'forward_calls': self.forward_calls.item(),
             'expert_successes': self.expert_successes.item(),
             'success_rate': (
                 self.expert_successes / max(self.forward_calls, 1)
             ).item(),
-            'fusion': 'residual',
+            'fusion': self.fusion_type,
             'my_index': self.my_index,
             'router_stats': self.router.get_usage_statistics()
         }
+        if self.fusion_type == "adaptive":
+            stats['alpha'] = self.alpha.item()
+        return stats
 
 
 # ============================================================================
@@ -324,5 +341,7 @@ def create_sage_layer(
         my_index=my_index,
         expert_pool=expert_pool,
         residual_scale=config.get('residual_scale', 0.1),
+        fusion_type=config.get('fusion_type', 'residual'),
+        adaptive_alpha=config.get('adaptive_alpha', 0.9),
     )
 

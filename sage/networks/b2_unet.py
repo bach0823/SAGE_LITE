@@ -47,6 +47,9 @@ DEFAULT_SAGE_CONFIG: Dict[str, Any] = {
     "load_balance_factor": 0.01,
     "logit_modulation": True,
     "expert_dropout": 0.1,
+    "fusion_type": "residual",
+    "residual_scale": 0.1,
+    "adaptive_alpha": 0.9,
 }
 
 
@@ -266,6 +269,8 @@ class B2ConvNeXtViTUNet(nn.Module):
             "top_k": self.sage_config.get("top_k", 4),
             "router_hidden_dim": self.sage_config.get("router_hidden_dim", 64),
             "gating_type": self.sage_config.get("gating_type", "sigmoid"),
+            "fusion_type": self.sage_config.get("fusion_type", "residual"),
+            "residual_scale": self.sage_config.get("residual_scale", 0.1),
         }
 
 
