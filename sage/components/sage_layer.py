@@ -155,6 +155,9 @@ class SageLayer(nn.Module):
             if isinstance(main_output, tuple):
                 return main_output[0]
             return main_output
+        except torch.cuda.OutOfMemoryError as e:
+            self.logger.error("OOM encountered in main path, propagating...")
+            raise e
         except Exception as e:
             self.logger.warning(f"Main block failed: {e}")
             return x
@@ -254,6 +257,9 @@ class SageLayer(nn.Module):
             self.expert_successes += 1
             return final_expert_output, routing_info
             
+        except torch.cuda.OutOfMemoryError as e:
+            self.logger.error("OOM encountered in expert path, propagating...")
+            raise e
         except Exception as e:
             self.logger.error(f"Expert path failed: {e}", exc_info=True)
             routing_info = {'error': str(e)}
