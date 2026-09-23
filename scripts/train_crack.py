@@ -20,36 +20,50 @@ from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 
 def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, weight_decay=0.05):
+    """
+    Construct optimizer parameter groups categorized by learning rate tiers and weight decay:
+    - Backbone (pretrained ConvNeXt stages and ViT blocks): lr_backbone (1e-5)
+    - Decoder & Interface (UNet decoder and newly initialized hybrid bridge layers): lr_decoder (1e-4)
+    - SAGE components (routers, SA-Hub adapters, adaptive fusion alpha): lr_sage (1e-4)
+    - Weight decay: 0.0 for LayerNorm/Norm and biases; weight_decay (0.05) for weights.
+    """
     if lr_sage is None:
         lr_sage = lr_decoder
 
-    optimizer_groups = []
+    # Interface / bridge layers between ConvNeXt and ViT are newly initialized (NOT pretrained)
+    interface_keys = (
+        'convnext_to_transformer',
+        'transformer_to_decoder',
+        'pre_transformer_norm',
+        'post_transformer_norm',
+    )
+
+    groups = {
+        'backbone_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_backbone, 'name': 'backbone'},
+        'backbone_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_backbone, 'name': 'backbone'},
+        'decoder_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_decoder, 'name': 'decoder'},
+        'decoder_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_decoder, 'name': 'decoder'},
+        'sage_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_sage, 'name': 'sage'},
+        'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_sage, 'name': 'sage'},
+    }
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
             
-        if 'LayerNorm' in name or 'norm' in name.lower() or name.endswith('.bias'):
-            wd = 0.0
+        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias')
+        
+        if 'router' in name or 'sa_hub' in name or 'alpha' in name:
+            tier = 'sage'
+        elif name.startswith('decoder') or any(k in name for k in interface_keys):
+            tier = 'decoder'
         else:
-            wd = weight_decay
+            tier = 'backbone'
             
-        if 'router' in name or 'sa_hub' in name:
-            lr = lr_sage
-            group_name = 'sage'
-        elif name.startswith('decoder'):
-            lr = lr_decoder
-            group_name = 'decoder'
-        else:
-            lr = lr_backbone
-            group_name = 'backbone'
-            
-        optimizer_groups.append({
-            'params': [param],
-            'weight_decay': wd,
-            'lr': lr,
-            'name': group_name
-        })
-    return optimizer_groups
+        group_key = f"{tier}_no_decay" if is_no_decay else f"{tier}_decay"
+        groups[group_key]['params'].append(param)
+        
+    return [g for g in groups.values() if len(g['params']) > 0]
 
 def get_scheduler(optimizer, epochs, warmup_epochs=3):
     return CosineLRScheduler(

@@ -218,14 +218,44 @@ def run_smoke_test():
     dec_params = [g for g in optimizer_groups if g['name'] == 'decoder']
     sage_params = [g for g in optimizer_groups if g['name'] == 'sage']
     
-    print(f"  Backbone group param tensors: {len(bb_params)} (LR = {bb_params[0]['lr']})")
-    print(f"  Decoder group param tensors:  {len(dec_params)} (LR = {dec_params[0]['lr']})")
-    print(f"  SAGE group param tensors:     {len(sage_params)} (LR = {sage_params[0]['lr']})")
+    print(f"  Backbone physical groups: {len(bb_params)} (LR = {bb_params[0]['lr']})")
+    print(f"  Decoder physical groups:  {len(dec_params)} (LR = {dec_params[0]['lr']})")
+    print(f"  SAGE physical groups:     {len(sage_params)} (LR = {sage_params[0]['lr']})")
     
     assert bb_params[0]['lr'] == 1e-5, f"Expected backbone LR 1e-5, got {bb_params[0]['lr']}"
     assert dec_params[0]['lr'] == 1e-4, f"Expected decoder LR 1e-4, got {dec_params[0]['lr']}"
     assert sage_params[0]['lr'] == 1e-4, f"Expected SAGE LR 1e-4, got {sage_params[0]['lr']}"
-    print("  [PASS] Test 7: 3 optimizer param groups verified with exact target learning rates.")
+
+    # Verify EVERY single parameter's semantic optimizer assignment
+    param_to_group = {}
+    for g in optimizer_groups:
+        for p in g['params']:
+            param_to_group[id(p)] = g
+
+    interface_keys = ('convnext_to_transformer', 'transformer_to_decoder', 'pre_transformer_norm', 'post_transformer_norm')
+    total_checked = 0
+    for name, param in model_d12.named_parameters():
+        if not param.requires_grad:
+            continue
+        total_checked += 1
+        assert id(param) in param_to_group, f"Parameter {name} was not assigned to any optimizer group!"
+        g = param_to_group[id(param)]
+
+        if 'router' in name or 'sa_hub' in name or 'alpha' in name:
+            assert g['name'] == 'sage' and g['lr'] == 1e-4, f"SAGE param {name} misclassified: {g['name']}, {g['lr']}"
+        elif name.startswith('decoder') or any(k in name for k in interface_keys):
+            assert g['name'] == 'decoder' and g['lr'] == 1e-4, f"Decoder/interface param {name} misclassified: {g['name']}, {g['lr']}"
+        else:
+            assert g['name'] == 'backbone' and g['lr'] == 1e-5, f"Backbone param {name} misclassified: {g['name']}, {g['lr']}"
+
+        # Weight decay check
+        if 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias'):
+            assert g['weight_decay'] == 0.0, f"Expected wd=0.0 for norm/bias {name}"
+        else:
+            assert g['weight_decay'] == 0.05, f"Expected wd=0.05 for weight {name}"
+
+    print(f"  Verified 100% of {total_checked} trainable parameters individually for semantic LR and WD assignment.")
+    print("  [PASS] Test 7: Consolidated optimizer param groups + full per-parameter assignment verified.")
 
     # =========================================================================
     # Test 8: Dynamic Depth Compatibility (Depth 6 Verification)
@@ -250,6 +280,9 @@ def run_smoke_test():
     assert len(ret_d6['routing_infos']['all']) == 10
     print(f"  Depth 6: 10 routers (4 CNN + 6 ViT), pool size 10, output shape {tuple(ret_d6['logits'].shape)}")
     print("  [PASS] Test 8: Dynamic depth sweep architecture (Depth 6) verified.")
+    del model_d6, ret_d6
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     # =========================================================================
     # Test 8.5: Fusion Types Verification (Residual vs Adaptive)
@@ -282,6 +315,9 @@ def run_smoke_test():
     alpha_params = [name for name in adp_named_params.keys() if 'alpha' in name]
     assert len(alpha_params) > 0, "Adaptive variant must have 'alpha' parameter in SageLayer"
     
+    del model_residual, model_adaptive
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
     print("  [PASS] Test 8.5: Fusion types (residual/adaptive) correctly configured and parameterized.")
 
     # =========================================================================
@@ -326,12 +362,62 @@ def run_smoke_test():
         print(f"  Max absolute output difference after load: {diff:.8e}")
         assert diff < 1e-6, f"Output difference too large: {diff}"
         print("  [PASS] Test 9: Checkpoint round-trip exact match with 0 missing/unexpected keys.")
+        del model_loaded
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
+    # =========================================================================
+    # Test 10: Exception Handling & OOM Propagation Verification
+    # =========================================================================
+    print("\n--- [Test 10] Expert Path Exception Handling & OOM Propagation ---")
+    sage_layer = None
+    for m in model_d12.modules():
+        if isinstance(m, SageLayer):
+            sage_layer = m
+            break
+    assert sage_layer is not None, "No SageLayer found in model_d12"
+
+    dummy_x = torch.randn(1, 48, 112, 112, device=device)
+    dummy_main = torch.zeros(1, 48, 112, 112, device=device)
+    orig_adapt = sage_layer.sa_hub.adapt
+    
+    try:
+        # 1. Test generic recoverable exception fallback (should NOT crash, should return zero tensor)
+        def broken_adapt(*args, **kwargs):
+            raise RuntimeError("Simulated recoverable SA-Hub exception")
+            
+        sage_layer.sa_hub.adapt = broken_adapt
+        out_fallback, r_info_fallback = sage_layer._execute_expert_path(
+            dummy_x, dummy_main, model_d12.expert_pool
+        )
+        assert 'error' in r_info_fallback, f"Expected 'error' in routing_info upon recoverable exception, got {r_info_fallback}"
+        assert (out_fallback == 0).all(), "Expected zero-filled fallback tensor upon recoverable exception"
+        print("  [PASS] Generic recoverable exception correctly caught and safely fallen back to zero tensor.")
+
+        # 2. Test OOM propagation: torch.cuda.OutOfMemoryError MUST propagate and NOT be caught!
+        def oom_adapt(*args, **kwargs):
+            raise torch.cuda.OutOfMemoryError("Simulated CUDA Out Of Memory Error")
+
+        sage_layer.sa_hub.adapt = oom_adapt
+        oom_raised = False
+        try:
+            sage_layer._execute_expert_path(
+                dummy_x, dummy_main, model_d12.expert_pool
+            )
+        except torch.cuda.OutOfMemoryError:
+            oom_raised = True
+        assert oom_raised, "[CRITICAL VIOLATION] torch.cuda.OutOfMemoryError was swallowed by SageLayer!"
+        print("  [PASS] torch.cuda.OutOfMemoryError strictly propagated (NOT swallowed).")
+    finally:
+        sage_layer.sa_hub.adapt = orig_adapt
+
+    print("  [PASS] Test 10: Exception fallback and OOM propagation verified.")
+
     print("\n" + "=" * 70)
-    print("ALL 9 TESTS PASSED! B2 ARCHITECTURE FULLY VERIFIED!")
+    print("ALL 10 TESTS PASSED! B2 ARCHITECTURE FULLY VERIFIED!")
     print("=" * 70)
     return True
 
