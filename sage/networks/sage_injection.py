@@ -108,9 +108,10 @@ def inject_sage_layers(
             block_wrapper.expert_pool = expert_pool
 
     logger.info(
-        "\n\u2713 Built expert pool with %s experts, linked to all SageLayer instances.",
+        "\n[OK] Built expert pool with %s experts, linked to all SageLayer instances.",
         len(expert_pool),
     )
+
     logger.info("=" * 80)
     return expert_pool
 

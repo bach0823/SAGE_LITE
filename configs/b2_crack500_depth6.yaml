@@ -6,7 +6,10 @@ batch_size: 12
 num_workers: 4
 epochs: 30
 patience: 6
+two_stage: true
 lr: 1e-4
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
 output_dir: "/content/drive/MyDrive/crack_seg/B2_Crack500_Depth6"
 mask_suffix: ""
 smart_filter: true

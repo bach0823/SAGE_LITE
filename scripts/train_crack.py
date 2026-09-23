@@ -4,20 +4,103 @@ import os
 import sys
 import yaml
 from tqdm import tqdm
+from typing import Optional, Set
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from timm.scheduler.cosine_lr import CosineLRScheduler
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+scripts_dir = os.path.abspath(os.path.dirname(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
+
 
 import time
 
 from sage.networks import create_b0_unet, create_b1_unet, create_b2_unet
 from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import setup_logging, set_seed, seed_worker
+
+DEFAULT_SHARED_PREFIXES = {
+    "backbone.convnext.stages.0.main_block.",
+    "backbone.convnext.stages.1.main_block.",
+    "backbone.convnext.stages.2.main_block.",
+    "backbone.convnext.stages.3.main_block.",
+    "backbone.convnext.stages.0.expert_pool.0.",
+    "backbone.convnext.stages.0.expert_pool.1.",
+    "backbone.convnext.stages.0.expert_pool.2.",
+    "backbone.convnext.stages.0.expert_pool.3.",
+    "expert_pool.0.",
+    "expert_pool.1.",
+    "expert_pool.2.",
+    "expert_pool.3.",
+}
+
+
+def create_stage2_optimizer(
+    model: nn.Module,
+    stage2_base_lr: float,
+    stage2_shared_lr: float,
+    shared_prefixes: Optional[Set[str]] = None,
+    weight_decay: float = 0.05,
+) -> optim.Optimizer:
+    """
+    Construct Stage-2 optimizer parameter groups according to SAGE-Lite protocol:
+    - Shared experts (CNN main_block stages): stage2_shared_lr
+    - Other components (ViT blocks, routers, SA-Hub adapters, decoder, bridge layers): stage2_base_lr
+    - Weight decay: 0.0 for LayerNorm/Norm and biases; weight_decay (0.05) for weights.
+    - All trainable parameters retain requires_grad=True (no freezing).
+    """
+    if shared_prefixes is None:
+        shared_prefixes = DEFAULT_SHARED_PREFIXES
+
+    groups = {
+        'shared_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
+        'shared_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
+        'others_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
+        'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
+    }
+
+    shared_param_ids = set()
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'convnext') and hasattr(model.backbone.convnext, 'stages'):
+        for stage_idx in range(min(4, len(model.backbone.convnext.stages))):
+            stage = model.backbone.convnext.stages[stage_idx]
+            block = stage.main_block if hasattr(stage, 'main_block') else stage
+            for p in block.parameters():
+                shared_param_ids.add(id(p))
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias')
+        is_shared = (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes)
+        tier = 'shared' if is_shared else 'others'
+
+        group_key = f"{tier}_no_decay" if is_no_decay else f"{tier}_decay"
+        groups[group_key]['params'].append(param)
+
+
+    param_groups = [g for g in groups.values() if len(g['params']) > 0]
+
+    # Parameter partition integrity assertions
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    all_group_params = []
+    for g in param_groups:
+        all_group_params.extend(g['params'])
+
+    assert len(trainable_params) == len(all_group_params), (
+        f"Parameter count mismatch in Stage 2 optimizer: trainable={len(trainable_params)} vs groups={len(all_group_params)}"
+    )
+    assert len(set(trainable_params)) == len(set(all_group_params)), (
+        "Duplicate parameters found across Stage 2 optimizer groups!"
+    )
+
+    return optim.AdamW(param_groups)
 
 def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, weight_decay=0.05):
     """
@@ -366,9 +449,21 @@ def main(args):
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
-        
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
-        optimizer = optim.AdamW(param_groups)
+
+            shared_indices = config.get("sage_config", {}).get("shared_expert_indices") or config.get("sage", {}).get("shared_expert_indices", [0, 1, 2, 3])
+
+            if hasattr(model, "set_shared_experts"):
+                model.set_shared_experts(shared_indices)
+                logger.info(f"Stage 2: Updated shared expert indices to {shared_indices}")
+
+            stage2_base_lr = float(config.get("stage2_base_lr", base_lr))
+            stage2_shared_lr = float(config.get("stage2_shared_lr", base_lr))
+            logger.info(f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}")
+            optimizer = create_stage2_optimizer(model, stage2_base_lr=stage2_base_lr, stage2_shared_lr=stage2_shared_lr)
+        else:
+            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
+            optimizer = optim.AdamW(param_groups)
+
         scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=3)
         
         best_stage_dice = 0.0
@@ -430,12 +525,18 @@ def main(args):
             train_dice /= len(train_loader)
             train_lb_loss /= len(train_loader)
             
-            bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
-            dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
-            sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
-            lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
-            if sage_lr is not None:
-                lr_str += f", SAGE={sage_lr:.2e}"
+            if stage == 2:
+                sh_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), 0.0)
+                oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'other_and_routers'), 0.0)
+                lr_str = f"Shared={sh_lr:.2e}, Others={oth_lr:.2e}"
+            else:
+                bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
+                dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
+                sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
+                lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
+                if sage_lr is not None:
+                    lr_str += f", SAGE={sage_lr:.2e}"
+
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
             is_best_stage = False

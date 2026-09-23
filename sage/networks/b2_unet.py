@@ -130,6 +130,19 @@ class B2ConvNeXtViTUNet(nn.Module):
         """Number of shared CNN stages (fixed at 4)."""
         return self.backbone.num_sage_experts
 
+    def set_shared_experts(self, shared_expert_indices: List[int]) -> None:
+        """
+        Update shared expert indices across all SageRouters in the model
+        and trigger router shared mask recomputation.
+        """
+        self.sage_config["shared_expert_indices"] = list(shared_expert_indices)
+        for module in self.modules():
+            if isinstance(module, SageRouter):
+                module.shared_expert_indices = list(shared_expert_indices)
+                if hasattr(module, "_update_shared_mask"):
+                    module._update_shared_mask()
+
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass satisfying Strict Tensor Contract (Lock #1).
