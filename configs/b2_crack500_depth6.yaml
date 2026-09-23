@@ -2,7 +2,7 @@ model: B2
 num_transformer_layers: 6
 seed: 42
 img_size: 448
-batch_size: 20
+batch_size: 12
 num_workers: 4
 epochs: 30
 patience: 6
@@ -20,6 +20,8 @@ sage_config:
   load_balance_factor: 0.01
   logit_modulation: true
   expert_dropout: 0.1
+  fusion_type: "residual"
+  residual_scale: 0.1
 
 root_dir: "/content/dataset/Crack500"
 

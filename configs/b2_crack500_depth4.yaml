@@ -1,5 +1,5 @@
 model: B2
-num_transformer_layers: 12
+num_transformer_layers: 4
 seed: 42
 img_size: 448
 batch_size: 12
@@ -7,7 +7,7 @@ num_workers: 4
 epochs: 30
 patience: 6
 lr: 1e-4
-output_dir: "/content/drive/MyDrive/crack_seg/B2_Crack500_Depth12"
+output_dir: "/content/drive/MyDrive/crack_seg/B2_Crack500_Depth4"
 mask_suffix: ""
 smart_filter: true
 crop_mode: "random"
