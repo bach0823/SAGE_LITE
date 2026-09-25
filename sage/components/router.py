@@ -292,9 +292,10 @@ class SageRouter(nn.Module):
         # Step 6b: Compute lightweight scalar routing entropy across full batch:
         # H = mean_b[-sum_k p_bk * log2(p_bk)]
         if B > 0 and self.top_k > 0:
-            weights_sum = gating_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-            norm_p = gating_weights / weights_sum
-            log2_p = torch.log2(norm_p.clamp(min=1e-8))
+            weights_f32 = gating_weights.float()
+            weights_sum = weights_f32.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+            norm_p = weights_f32 / weights_sum
+            log2_p = torch.log2(norm_p.clamp_min(1e-8))
             sample_entropies = -(norm_p * log2_p).sum(dim=-1)
             routing_entropy_mean = float(sample_entropies.mean().item())
         else:
