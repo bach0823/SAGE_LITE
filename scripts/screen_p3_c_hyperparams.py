@@ -368,10 +368,22 @@ def run_p3_c_screening_trial(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
 
-    # 1. Instantiate P3-C UNet Model
+    # Enforce parent checkpoint invariants for real-data screening
+    if not dry_run:
+        if parent_checkpoint is None:
+            raise ValueError(
+                f"Parent B2 Base checkpoint is REQUIRED for trial {candidate_id} on real data. "
+                "parent_checkpoint cannot be None."
+            )
+        if not os.path.exists(parent_checkpoint):
+            raise FileNotFoundError(
+                f"Parent B2 Base checkpoint not found at: {parent_checkpoint}"
+            )
+
+    # 1. Instantiate P3-C UNet Model (pretrained=False; never fall back to ImageNet weights)
     model = create_b2_unet(
         num_transformer_layers=vit_depth,
-        pretrained=not dry_run and (parent_checkpoint is None),
+        pretrained=False,
         sage_config=sage_cfg,
         p3_mode='C', # P3-C ASDW refinement
     ).to(device)
@@ -379,14 +391,14 @@ def run_p3_c_screening_trial(
     assert isinstance(model, B2ConvNeXtViTUNet), "Model instantiation error!"
     assert model.p3_mode == 'C', f"Expected p3_mode='C', got '{model.p3_mode}'!"
 
-    # 2. Ingest Parent Base Checkpoint if provided
+    # 2. Ingest Parent Base Checkpoint via load_locked_base_into_p3
     if parent_checkpoint and os.path.exists(parent_checkpoint):
-        print(f"  Ingesting parent base checkpoint from {parent_checkpoint}...")
+        print(f"  Ingesting parent base checkpoint from {parent_checkpoint} via load_locked_base_into_p3()...")
         load_locked_base_into_p3(model, parent_checkpoint, p3_mode='C')
     elif dry_run:
         print("  [Notice] Dry-run mode: initialized P3-C without parent checkpoint.")
     else:
-        print("  [Notice] Initializing P3-C directly from pretrained backbone (no parent checkpoint).")
+        raise ValueError("Fatal error: Non-dry-run reached without valid parent checkpoint.")
 
     # 3. Apply candidate gamma_init
     set_p3_gamma_init(model, gamma_init)
@@ -723,6 +735,8 @@ def run_p3_c_screening_trial(
 
     trial_summary = {
         "candidate_id": candidate_id,
+        "parent_checkpoint_basename": os.path.basename(parent_checkpoint) if parent_checkpoint else "None (dry-run)",
+        "parent_checkpoint_sha256": compute_file_sha256(parent_checkpoint) if (parent_checkpoint and os.path.exists(parent_checkpoint)) else "N/A",
         "p3_lr": p3_lr,
         "gamma_init": gamma_init,
         # Segmentation Metrics
@@ -815,6 +829,28 @@ def main():
     if parent_ckpt and not os.path.isabs(parent_ckpt):
         parent_ckpt = os.path.join(project_root, parent_ckpt)
 
+    # Methodology-critical validation: For real-data screening, an explicit parent B2 Base checkpoint is REQUIRED.
+    if not args.dry_run:
+        if parent_ckpt is None:
+            raise ValueError(
+                "Parent B2 Base checkpoint is REQUIRED for real-data screening (--parent-checkpoint or --locked-base). "
+                "Real-data screening must ingest an explicit locked base checkpoint. Pretrained fallback is strictly forbidden."
+            )
+        if not os.path.exists(parent_ckpt):
+            raise FileNotFoundError(
+                f"Parent B2 Base checkpoint file does not exist: {parent_ckpt}"
+            )
+
+    if parent_ckpt and os.path.exists(parent_ckpt):
+        parent_basename = os.path.basename(parent_ckpt)
+        parent_sha256 = compute_file_sha256(parent_ckpt)
+    elif args.dry_run:
+        parent_basename = "None (Dry-run mock initialization)"
+        parent_sha256 = "N/A (dry-run)"
+    else:
+        parent_basename = "None"
+        parent_sha256 = "N/A"
+
     config_path = args.config
     if not os.path.isabs(config_path):
         config_path = os.path.join(project_root, config_path)
@@ -850,9 +886,8 @@ def main():
     print(f"Device: {device} ({dev_name}, Total VRAM: {total_vram_gb:.2f} GB)")
     print(f"Config: {os.path.basename(config_path)}")
     print(f"Git Commit: {get_git_commit_hash()}")
-    print(f"Parent Checkpoint: {parent_ckpt or 'NONE (Pretrained ConvNeXt initialization)'}")
-    if parent_ckpt and os.path.exists(parent_ckpt):
-        print(f"Parent SHA256: {compute_file_sha256(parent_ckpt)[:16]}...")
+    print(f"Parent Checkpoint Basename: {parent_basename}")
+    print(f"Parent Checkpoint SHA256:   {parent_sha256}")
     print(f"Dataset Root: {base_cfg['root_dir']}")
     print(f"Batch Size: {base_cfg['batch_size']} | Workers: {base_cfg['num_workers']} | Depth: {base_cfg['num_transformer_layers']}")
     print(f"Protocol: Two-Stage (Stage 1={args.stage1_epochs} ep, Stage 2={args.stage2_epochs} ep, warmup={args.warmup_epochs} ep)")
@@ -923,7 +958,6 @@ def main():
     avg_ep_sec_all = float(np.mean([r['mean_epoch_time_s'] for r in results])) if results else 0.0
 
     # Build Markdown Summary Report
-    parent_provenance_str = os.path.basename(parent_ckpt) if parent_ckpt else "None (Pretrained initialization)"
     md_lines = [
         "# SAGE-Lite B2 Phase 1 P3-C (ASDW) Base Hyperparameter Screening Report",
         "",
@@ -931,6 +965,8 @@ def main():
         "> **Bản chất Nghiên cứu: P3-C là Mô hình Base Mới**",
         "> - Nhánh nghiên cứu chuyển sang **P3-C (ASDW)** làm mô hình chuẩn (Base Model) thay cho B2 Base thuần.",
         "> - B2 Base đóng vai trò là checkpoint khởi tạo (parent checkpoint); toàn bộ candidate đều bắt đầu từ cùng một checkpoint này.",
+        f"> - **Parent Checkpoint Basename**: `{parent_basename}`",
+        f"> - **Parent Checkpoint SHA256**: `{parent_sha256}`",
         f"> - **Screening-specific protocol**: Stage 1 = {args.stage1_epochs} epochs (warmup = {args.warmup_epochs} epoch), Stage 2 = {args.stage2_epochs} epochs (warmup = {args.warmup_epochs} epoch).",
         "> - **Canonical Confirmation protocol**: Lượt huấn luyện đầy đủ chính thức sẽ áp dụng chuẩn `warmup = 3` epochs cho scheduler.",
         "",
@@ -938,7 +974,8 @@ def main():
         f"*Hardware: {dev_name} ({total_vram_gb:.2f} GB VRAM)*",
         f"*Git Commit HEAD: `{get_git_commit_hash()}`*",
         f"*ViT Depth: {base_cfg['num_transformer_layers']} | Batch Size: {base_cfg['batch_size']} | Workers: {base_cfg['num_workers']}*",
-        f"*Parent Checkpoint (Provenance): `{parent_provenance_str}`*",
+        f"*Parent Checkpoint Basename: `{parent_basename}`*",
+        f"*Parent Checkpoint SHA256: `{parent_sha256}`*",
         f"*DataLoader Isolation: Fresh Generator(seed=42) per trial per stage (100% batch-order reproducibility)*",
         f"*Objective Scaling: Total Loss = Seg_Loss + 1.0 * LB_Loss*",
         f"*Evaluation: Strictly Crack500 Val Split ({len(val_pairs)} pairs). Test split unaccessed.*",
