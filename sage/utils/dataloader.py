@@ -45,6 +45,7 @@ def get_transformations(img_size, crop_mode='random'):
         ]
         val_crop = [
             A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0),
+            A.CenterCrop(height=img_size, width=img_size),
         ]
     else:
         # Dynamic Pad-to-Square is performed in __getitem__ before transforms.
