@@ -243,6 +243,7 @@ def main(args):
         drop_last=False
     )
     
+    p3_mode = config.get('p3_mode', None)
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
         model = create_b0_unet(pretrained=True).to(device)
@@ -254,15 +255,41 @@ def main(args):
         vit_depth = int(config.get('num_transformer_layers', 12))
         sage_cfg = config.get('sage_config', {})
         model = create_b2_unet(
+            num_classes=1,
+            img_size=img_size,
             num_transformer_layers=vit_depth,
             pretrained=True,
-            sage_config=sage_cfg
+            sage_config=sage_cfg,
+            p3_mode=p3_mode,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks and full SAGE-Lite injection")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, and p3_mode='{p3_mode}'")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         
     logger.info(f"Initialized {model_type} model")
+
+    # Ingest locked-base checkpoint or pre-trained checkpoint if provided
+    locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
+    generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
+
+    if locked_base_path:
+        from sage.utils.model_utils import load_locked_base_into_p3
+        logger.info(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
+        load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode or "A")
+    elif generic_ckpt_path:
+        logger.info(f"Loading checkpoint from {generic_ckpt_path}...")
+        ckpt = torch.load(generic_ckpt_path, map_location=device, weights_only=False)
+        sd = ckpt.get('model_state_dict', ckpt)
+        if p3_mode is not None:
+            from sage.utils.model_utils import load_locked_base_into_p3
+            try:
+                load_locked_base_into_p3(model, sd, p3_mode=p3_mode)
+            except Exception as e:
+                logger.warning(f"load_locked_base_into_p3 strict check skipped ({e}), loading with strict=False...")
+                model.load_state_dict(sd, strict=False)
+        else:
+            model.load_state_dict(sd, strict=False)
+
     criterion = CrackBinaryLoss()
     scaler = torch.amp.GradScaler('cuda')
     
@@ -372,6 +399,8 @@ def main(args):
                     save_dict['num_transformer_layers'] = vit_depth
                 if model_type == 'B2':
                     save_dict['sage_config'] = sage_cfg
+                    if p3_mode is not None:
+                        save_dict['p3_mode'] = p3_mode
                 torch.save(save_dict, ckpt_path)
                 logger.info(f"*** New BEST model saved with Val Dice: {best_dice:.4f}, Val Loss: {best_loss:.4f} ***")
             else:
@@ -389,6 +418,8 @@ def main(args):
                 last_save_dict['num_transformer_layers'] = vit_depth
             if model_type == 'B2':
                 last_save_dict['sage_config'] = sage_cfg
+                if p3_mode is not None:
+                    last_save_dict['p3_mode'] = p3_mode
             torch.save(last_save_dict, last_ckpt_path)
             
             if epochs_no_improve >= patience:
@@ -552,13 +583,16 @@ def main(args):
                 epochs_no_improve = 0
                 
                 ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage{stage}.pth")
-                torch.save({
+                stage_ckpt_data = {
                     'epoch': int(epoch),
                     'stage': int(stage),
                     'model_state_dict': model.state_dict(),
                     'best_dice': float(best_stage_dice),
                     'best_loss': float(best_stage_loss),
-                }, ckpt_path)
+                }
+                if model_type == 'B2' and p3_mode is not None:
+                    stage_ckpt_data['p3_mode'] = p3_mode
+                torch.save(stage_ckpt_data, ckpt_path)
                 logger.info(f"New best Stage {stage} model saved with Val Dice: {best_stage_dice:.4f} and Val Loss: {best_stage_loss:.4f}")
                 
                 is_global_best = False
@@ -572,13 +606,16 @@ def main(args):
                     global_best_dice = val_dice
                     global_best_loss = val_loss
                     global_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_global.pth")
-                    torch.save({
+                    global_ckpt_data = {
                         'epoch': int(epoch),
                         'stage': int(stage),
                         'model_state_dict': model.state_dict(),
                         'best_dice': float(global_best_dice),
                         'best_loss': float(global_best_loss),
-                    }, global_ckpt_path)
+                    }
+                    if model_type == 'B2' and p3_mode is not None:
+                        global_ckpt_data['p3_mode'] = p3_mode
+                    torch.save(global_ckpt_data, global_ckpt_path)
                     logger.info(f"*** New GLOBAL best model saved (Dice: {global_best_dice:.4f}) ***")
             else:
                 epochs_no_improve += 1
@@ -601,6 +638,8 @@ if __name__ == '__main__':
     parser.add_argument('--stage2-only', action='store_true', help='Skip Stage 1 and resume directly to Stage 2 using stage 1 checkpoint')
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     parser.add_argument('--two-stage', action='store_true', help='Enable legacy 2-stage ladder training (default is single-stage)')
+    parser.add_argument('--locked-base', type=str, default=None, help='Path to locked base checkpoint to ingest via load_locked_base_into_p3')
+    parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint file to resume or initialize from')
     args = parser.parse_args()
     main(args)
 

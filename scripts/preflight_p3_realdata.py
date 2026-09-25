@@ -51,7 +51,7 @@ from scripts.train_crack import (
 from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
 
 
-def run_single_preflight(config_path: str, data_root_override: str = None, num_batches: int = 3):
+def run_single_preflight(config_path: str, data_root_override: str = None, locked_base_override: str = None, num_batches: int = 3):
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
@@ -115,25 +115,44 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
     )
     dataloader_health = "PASS"
 
-    # 3. Model Instantiation
+    # 3. Model Instantiation (100% aligned with scripts/train_crack.py)
     print(f"\n[Model Instantiation: {run_id}]")
     model = create_b2_unet(
         num_classes=1,
         img_size=img_size,
         num_transformer_layers=int(cfg.get('num_transformer_layers', 4)),
-        pretrained=False,
+        pretrained=True,
         sage_config=cfg.get('sage_config'),
         p3_mode=p3_mode
     ).to(device)
     model.train()
 
-    # Verify PE28 initial buffer state
+    # Ingest locked-base checkpoint if configured
+    locked_base_path = locked_base_override or cfg.get('locked_base_checkpoint') or cfg.get('checkpoint')
+    if locked_base_path:
+        from sage.utils.model_utils import load_locked_base_into_p3
+        print(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
+        load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode)
+
+    # Verify PE28 initial buffer state & exact mathematical derivation from PE14
     assert hasattr(model.backbone, "pe28_fixed"), "Model lacks pe28_fixed buffer!"
     pe28 = model.backbone.pe28_fixed
     assert pe28.shape == (1, 784, 192), f"PE28 shape mismatch: {pe28.shape} != (1, 784, 192)"
     assert pe28.dtype == torch.float32, f"PE28 dtype {pe28.dtype} != float32"
     assert not pe28.requires_grad, "PE28 must NOT have requires_grad=True!"
-    print(f"PE28 Buffer Initial Invariant: Verified shape={list(pe28.shape)}, dtype={pe28.dtype}, requires_grad={pe28.requires_grad}")
+
+    pe14 = model.backbone.positional_embeddings.detach().cpu()
+    orig_grid = 14
+    pos_4d = pe14.reshape(1, orig_grid, orig_grid, -1).permute(0, 3, 1, 2)
+    expected_pe28 = (
+        torch.nn.functional.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
+        .permute(0, 2, 3, 1)
+        .flatten(1, 2)
+        .detach()
+        .float()
+    )
+    assert torch.equal(pe28.cpu(), expected_pe28), f"Run {p3_mode}: pe28_fixed is NOT bitwise derived from PE14 via bicubic interpolation!"
+    print(f"PE28 Initial Invariant & Derivation: Verified shape={list(pe28.shape)}, dtype={pe28.dtype}, non-trainable=True, exact_bicubic_from_pe14=True")
 
     # Verify P3 parameters in model
     p3_params = [p for n, p in model.named_parameters() if "p3_refinement" in n]
@@ -178,6 +197,8 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
 
         images = batch['image'].to(device, non_blocking=True)
         labels = batch['label'].to(device, non_blocking=True)
+        if labels.dim() == 3:
+            labels = labels.unsqueeze(1)
         current_bs = images.size(0)
         total_samples += current_bs
 
@@ -273,7 +294,7 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
         num_classes=1,
         img_size=img_size,
         num_transformer_layers=int(cfg.get('num_transformer_layers', 4)),
-        pretrained=False,
+        pretrained=True,
         sage_config=cfg.get('sage_config'),
         p3_mode=p3_mode
     ).to(device)
@@ -317,16 +338,10 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
     assert len(trainable_p2) == len(all_opt2_p), "Mismatch in total trainable vs opt2 parameters!"
     assert len(set(trainable_p2)) == len(set(all_opt2_p)), "Duplicate parameters in Stage 2 optimizer!"
 
-    # Verify shared expert prefix correctness
+    # Verify shared expert prefix correctness (aligned with train_crack.DEFAULT_SHARED_PREFIXES)
     shared_param_names = [param_id_to_name2.get(id(p), "") for p in shared_opt_p]
-    expected_prefixes = (
-        "backbone.convnext.stages.0.main_block.",
-        "backbone.convnext.stages.1.main_block.",
-        "backbone.convnext.stages.2.main_block.",
-        "backbone.convnext.stages.3.main_block.",
-    )
     for s_name in shared_param_names:
-        assert any(s_name.startswith(pfx) for pfx in expected_prefixes), f"Illegitimate parameter in shared_experts: {s_name}"
+        assert any(s_name.startswith(pfx) for pfx in DEFAULT_SHARED_PREFIXES), f"Illegitimate parameter in shared_experts: {s_name}"
         assert not any(x in s_name for x in ["router", "sa_hub", "alpha", "decoder", "transformer", "p3_refinement"]), (
             f"Non-CNN main_block found in shared_experts: {s_name}"
         )
@@ -365,6 +380,8 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
 
         images = batch['image'].to(device, non_blocking=True)
         labels = batch['label'].to(device, non_blocking=True)
+        if labels.dim() == 3:
+            labels = labels.unsqueeze(1)
         current_bs = images.size(0)
 
         opt2.zero_grad(set_to_none=True)
@@ -499,6 +516,7 @@ def run_single_preflight(config_path: str, data_root_override: str = None, num_b
         'nan_inf_status': "CLEAN (None)" if not (stage1_nan_inf or stage2_nan_inf) else "FAIL (NaN/Inf Detected)",
         'p3_grad_status': p3_grad_status,
         'pe28_status': pe28_status,
+        'pe28_tensor': pe28.cpu().clone(),
     }
 
     print(f"\n--> PREFLIGHT SUMMARY FOR {run_id}: ALL 24 INVARIANT CHECKS PASSED!\n")
@@ -509,6 +527,7 @@ def main():
     parser = argparse.ArgumentParser(description="Real-Data P3 Launch Preflight for Run A, Run B, and Run C")
     parser.add_argument('--config', type=str, default=None, help="Path to single YAML config")
     parser.add_argument('--data-root-override', type=str, default=None, help="Override root_dir in config")
+    parser.add_argument('--locked-base', type=str, default=None, help="Path to locked base checkpoint to ingest via load_locked_base_into_p3")
     parser.add_argument('--num-batches', type=int, default=3, help="Number of real batches per stage (default: 3)")
     args = parser.parse_args()
 
@@ -531,7 +550,12 @@ def main():
 
     for cfg_path in configs_to_run:
         try:
-            res = run_single_preflight(cfg_path, data_root_override=args.data_root_override, num_batches=args.num_batches)
+            res = run_single_preflight(
+                cfg_path,
+                data_root_override=args.data_root_override,
+                locked_base_override=args.locked_base,
+                num_batches=args.num_batches
+            )
             all_results.append(res)
         except Exception as e:
             print(f"\n[PREFLIGHT FAILED] Error during {cfg_path}: {e}")
@@ -539,6 +563,24 @@ def main():
             traceback.print_exc()
             all_passed = False
             break
+
+    # Cross-run PE28 numerical equality check
+    if len(all_results) == 3:
+        pe28_a = all_results[0]['pe28_tensor']
+        pe28_b = all_results[1]['pe28_tensor']
+        pe28_c = all_results[2]['pe28_tensor']
+        assert torch.equal(pe28_a, pe28_b), "pe28_fixed differs between Run A and Run B!"
+        assert torch.equal(pe28_b, pe28_c), "pe28_fixed differs between Run B and Run C!"
+        max_diff_ab = (pe28_a - pe28_b).abs().max().item()
+        max_diff_bc = (pe28_b - pe28_c).abs().max().item()
+        assert max_diff_ab == 0.0 and max_diff_bc == 0.0, "Discrepancy in pe28_fixed across runs!"
+        print("\n" + "=" * 80)
+        print("PE28 CROSS-RUN NUMERICAL EQUALITY AUDIT")
+        print("=" * 80)
+        print(f"Run A vs Run B: Identical (max diff = {max_diff_ab:.10e})")
+        print(f"Run B vs Run C: Identical (max diff = {max_diff_bc:.10e})")
+        print("Bitwise equality: Run A.pe28_fixed == Run B.pe28_fixed == Run C.pe28_fixed -> PASS")
+        print("=" * 80 + "\n")
 
     print("\n" + "=" * 80)
     print("FINAL CONSOLIDATED PREFLIGHT REPORT")
