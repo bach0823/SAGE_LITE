@@ -272,16 +272,29 @@ def main(args):
     locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
     generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
 
-    if p3_mode is not None and locked_base_path and generic_ckpt_path:
-        raise ValueError(
-            "For P3 runs (p3_mode is not None), both --locked-base (locked_base_checkpoint) and "
-            "--checkpoint cannot be supplied simultaneously. --locked-base is strictly for "
-            "Locked Base provenance, and --checkpoint is strictly for resume/continue."
-        )
+    if p3_mode is not None:
+        if not locked_base_path:
+            raise ValueError(
+                f"P3 training (p3_mode='{p3_mode}') requires an explicit Locked Base checkpoint "
+                "via --locked-base or 'locked_base_checkpoint' in YAML config. "
+                "Generic --checkpoint cannot be used to initialize or bypass Locked Base provenance."
+            )
+        if generic_ckpt_path:
+            raise ValueError(
+                f"For P3 runs (p3_mode='{p3_mode}'), both --locked-base (locked_base_checkpoint) and "
+                "--checkpoint cannot be supplied simultaneously. --locked-base is strictly for "
+                "Locked Base provenance, and --checkpoint is strictly for resume/continue."
+            )
 
     if locked_base_path:
         from sage.utils.model_utils import load_locked_base_into_p3
-        logger.info(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
+        from scripts.preflight_p3_realdata import compute_file_sha256, EXPECTED_LOCKED_BASE_SHA256
+        sha = compute_file_sha256(locked_base_path)
+        if p3_mode is not None and sha != EXPECTED_LOCKED_BASE_SHA256:
+            raise ValueError(
+                f"Unauthorized Locked Base Checkpoint! Expected SHA256 {EXPECTED_LOCKED_BASE_SHA256}, got {sha}"
+            )
+        logger.info(f"Ingesting locked base checkpoint from {locked_base_path} (SHA256: {sha[:16]}...) via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
         load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode or "A")
     elif generic_ckpt_path:
         logger.info(f"Loading checkpoint from {generic_ckpt_path} (resume/continue mechanism)...")

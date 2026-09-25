@@ -52,6 +52,9 @@ from scripts.train_crack import (
 from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
 
 
+EXPECTED_LOCKED_BASE_SHA256 = "5b928ec29fcaadc78acc0bbe97815fe0617f9efe45cbb8466671339a15d6c05c"
+
+
 def resolve_locked_base_path(cfg: dict, locked_base_override: str = None) -> str:
     """
     Resolve path to locked base checkpoint.
@@ -171,6 +174,11 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
         ckpt_sha256 = compute_file_sha256(locked_base_path)
         print(f"Locked base checkpoint file: {ckpt_basename}")
         print(f"Locked base checkpoint SHA256: {ckpt_sha256}")
+        assert ckpt_sha256 == EXPECTED_LOCKED_BASE_SHA256, (
+            f"Run {p3_mode}: Unauthorized checkpoint SHA256!\n"
+            f"  Expected: {EXPECTED_LOCKED_BASE_SHA256}\n"
+            f"  Actual:   {ckpt_sha256}"
+        )
 
         from sage.utils.model_utils import load_locked_base_into_p3
         print(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
@@ -648,15 +656,17 @@ def main():
         sha_b = all_results[1].get('checkpoint_sha256')
         sha_c = all_results[2].get('checkpoint_sha256')
         if all(r.get('locked_base_ingested', False) for r in all_results):
-            assert sha_a is not None and sha_a == sha_b == sha_c, (
-                f"Checkpoint SHA256 mismatch across runs! Run A: {sha_a}, Run B: {sha_b}, Run C: {sha_c}"
+            assert sha_a is not None and sha_a == sha_b == sha_c == EXPECTED_LOCKED_BASE_SHA256, (
+                f"Checkpoint SHA256 mismatch across runs or unauthorized!\n"
+                f"  Run A: {sha_a}\n  Run B: {sha_b}\n  Run C: {sha_c}\n  Expected: {EXPECTED_LOCKED_BASE_SHA256}"
             )
             print("=" * 80)
             print("LOCKED-BASE CHECKPOINT SHA256 INTEGRITY AUDIT")
             print("=" * 80)
             print(f"Checkpoint Basename: {all_results[0]['checkpoint_basename']}")
             print(f"Checkpoint SHA256:   {sha_a}")
-            print("Run A SHA256 == Run B SHA256 == Run C SHA256 -> PASS (Identical)")
+            print(f"Authorized Hash:     {EXPECTED_LOCKED_BASE_SHA256}")
+            print("Run A SHA256 == Run B SHA256 == Run C SHA256 == EXPECTED -> PASS (100% Authorized Match)")
             print("=" * 80 + "\n")
 
     print("\n" + "=" * 80)

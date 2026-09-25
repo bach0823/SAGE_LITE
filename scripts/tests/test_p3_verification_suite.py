@@ -40,6 +40,7 @@ from scripts.preflight_p3_realdata import (
     resolve_locked_base_path,
     compute_file_sha256,
     compute_preflight_verdict,
+    EXPECTED_LOCKED_BASE_SHA256,
 )
 
 
@@ -486,28 +487,46 @@ def test_13_locked_base_provenance_gate():
         assert "cannot be supplied simultaneously" in str(e)
     print("  --> Negative Test 3: Trainer rejects simultaneous --locked-base and --checkpoint for P3 (PASS)")
 
-    # 4. Positive Test: Explicit valid --locked-base checkpoint file
+    # 4. Negative Test 4: Trainer rejects P3 training when --locked-base is omitted
+    p3_mode = "C"
+    locked_base_path = None
+    generic_ckpt_path = "results/runs/best_model_b2.pth"
+    try:
+        if p3_mode is not None and not locked_base_path:
+            raise ValueError(
+                f"P3 training (p3_mode='{p3_mode}') requires an explicit Locked Base checkpoint "
+                "via --locked-base or 'locked_base_checkpoint' in YAML config. "
+                "Generic --checkpoint cannot be used to initialize or bypass Locked Base provenance."
+            )
+        assert False, "Should have raised ValueError on missing --locked-base for P3!"
+    except ValueError as e:
+        assert "requires an explicit Locked Base checkpoint" in str(e)
+    print("  --> Negative Test 4: Trainer rejects P3 training when --locked-base is omitted (PASS)")
+
+    # 5. Positive Test: Explicit valid authorized --locked-base checkpoint file
     real_ckpt_path = os.path.join(project_root, "checkpoints", "locked_base_b2_depth4.pth")
-    if os.path.exists(real_ckpt_path):
-        resolved_path_3 = resolve_locked_base_path({}, locked_base_override=real_ckpt_path)
-        assert resolved_path_3 == real_ckpt_path
-        sha = compute_file_sha256(resolved_path_3)
-        assert sha == "5b928ec29fcaadc78acc0bbe97815fe0617f9efe45cbb8466671339a15d6c05c", f"SHA mismatch: {sha}"
+    assert os.path.exists(real_ckpt_path), (
+        f"FAIL-FAST: Required locked-base checkpoint missing from repository at {real_ckpt_path}!"
+    )
+    resolved_path_3 = resolve_locked_base_path({}, locked_base_override=real_ckpt_path)
+    assert resolved_path_3 == real_ckpt_path
+    sha = compute_file_sha256(resolved_path_3)
+    assert sha == EXPECTED_LOCKED_BASE_SHA256, (
+        f"Checkpoint SHA256 mismatch! Expected {EXPECTED_LOCKED_BASE_SHA256}, got {sha}"
+    )
 
-        # Verify bitwise PE14 loading
-        m_b = create_b2_unet(pretrained=False, num_transformer_layers=4, p3_mode="B")
-        load_locked_base_into_p3(m_b, real_ckpt_path, p3_mode="B")
-        raw_sd = torch.load(real_ckpt_path, map_location="cpu", weights_only=False)["model_state_dict"]
-        assert torch.equal(m_b.backbone.positional_embeddings.cpu(), raw_sd["backbone.positional_embeddings"])
+    # Verify bitwise PE14 loading
+    m_b = create_b2_unet(pretrained=False, num_transformer_layers=4, p3_mode="B")
+    load_locked_base_into_p3(m_b, real_ckpt_path, p3_mode="B")
+    raw_sd = torch.load(real_ckpt_path, map_location="cpu", weights_only=False)["model_state_dict"]
+    assert torch.equal(m_b.backbone.positional_embeddings.cpu(), raw_sd["backbone.positional_embeddings"])
 
-        # Verify verdict is PASS
-        prov_label = f"VERIFIED_LOCKED_BASE({os.path.basename(real_ckpt_path)})"
-        mock_results_3 = [{"locked_base_ingested": True, "locked_base_provenance": prov_label, "checkpoint_sha256": sha}]
-        verdict_3 = compute_preflight_verdict(all_passed=True, results=mock_results_3)
-        assert "PASS" in verdict_3, f"Expected PASS verdict, got: {verdict_3}"
-        print(f"  --> Positive Test: Valid locked base gives {prov_label} with verified SHA256 -> PASS (PASS)")
-    else:
-        print(f"  --> NOTE: {real_ckpt_path} not found on disk; skipping positive file check.")
+    # Verify verdict is PASS
+    prov_label = f"VERIFIED_LOCKED_BASE({os.path.basename(real_ckpt_path)})"
+    mock_results_3 = [{"locked_base_ingested": True, "locked_base_provenance": prov_label, "checkpoint_sha256": sha}]
+    verdict_3 = compute_preflight_verdict(all_passed=True, results=mock_results_3)
+    assert "PASS" in verdict_3, f"Expected PASS verdict, got: {verdict_3}"
+    print(f"  --> Positive Test: Valid locked base matches authorized SHA256 ({EXPECTED_LOCKED_BASE_SHA256[:16]}...) -> PASS (PASS)")
 
     print("  --> PASS: Locked-Base Provenance Gate passed 100% (Negative & Strictness contracts satisfied).")
 
