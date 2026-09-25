@@ -254,7 +254,8 @@ class SageLayer(nn.Module):
                 if self.my_index is not None and expert_idx == self.my_index:
                     adapted_expert_output = main_output[original_batch_indices]
                 elif (
-                    getattr(self, "layer_type", None) == "cnn"
+                    self.get_pe28() is not None
+                    and getattr(self, "layer_type", None) == "cnn"
                     and getattr(self, "stage_idx", None) in (0, 1)
                     and getattr(expert, "expert_type", None) == "transformer"
                 ):

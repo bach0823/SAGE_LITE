@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import yaml
 import torch
@@ -21,15 +21,22 @@ def fatal_error(msg):
     sys.exit(1)
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Dataset Sanity Check")
+    parser.add_argument('--config', type=str, default="configs/b0_crack500.yaml", help="Path to config YAML")
+    parser.add_argument('--data-root', type=str, default=None, help="Override root_dir in config")
+    args = parser.parse_args()
+
     set_seed(42)
-    config_path = "configs/b0_crack500.yaml"
+    config_path = args.config
     if not os.path.exists(config_path):
         fatal_error(f"Config file not found: {config_path}")
         
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
         
-    root_dir = cfg.get('root_dir', '/content/dataset/Crack500')
+    root_dir = args.data_root or cfg.get('root_dir', '/content/dataset/Crack500')
+    cfg['root_dir'] = root_dir
     splits = ['train', 'val', 'test']
     
     # ---------------------------------------------------------
@@ -139,7 +146,7 @@ def main():
     print("\nChecking Dataset Pipeline (Configs & Dataloaders)...")
     img_size = cfg.get('img_size', 448)
     for sp in splits:
-        ds = get_dataset_from_config(config_path, split=sp, image_size=img_size)
+        ds = get_dataset_from_config(cfg, split=sp, image_size=img_size)
         loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=2)
         
         batch_count = 0
@@ -165,7 +172,7 @@ def main():
     # [G] VISUAL CHECK
     # ---------------------------------------------------------
     print("\nGenerating Visual Overlays from PIPELINE output...")
-    ds_vis = get_dataset_from_config(config_path, split='train', image_size=img_size)
+    ds_vis = get_dataset_from_config(cfg, split='train', image_size=img_size)
     
     num_vis = 5
     fig, axes = plt.subplots(num_vis, 5, figsize=(20, 4*num_vis))

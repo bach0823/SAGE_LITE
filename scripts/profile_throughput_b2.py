@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -213,8 +214,9 @@ def profile_worker_setting(
     mean_step = float(np.mean(step_times))
     std_step = float(np.std(step_times))
 
+    batches_per_epoch = len(train_loader) if len(train_loader) > 0 else math.ceil(len(train_dataset) / batch_size)
     throughput_sps = (batch_size / (mean_step / 1000.0)) if mean_step > 0 else 0.0
-    est_epoch_sec = (158 * mean_step) / 1000.0
+    est_epoch_sec = (batches_per_epoch * mean_step) / 1000.0
     est_epoch_min = est_epoch_sec / 60.0
 
     peak_vram_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == 'cuda' else 0.0
