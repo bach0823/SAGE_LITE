@@ -129,10 +129,30 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
 
     # Ingest locked-base checkpoint if configured
     locked_base_path = locked_base_override or cfg.get('locked_base_checkpoint') or cfg.get('checkpoint')
+    locked_base_provenance = "NOT_PROVEN"
+    locked_base_ingested = False
+
     if locked_base_path:
+        if not os.path.exists(locked_base_path):
+            raise FileNotFoundError(f"Locked base checkpoint not found at: {locked_base_path}")
         from sage.utils.model_utils import load_locked_base_into_p3
         print(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
         load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode)
+
+        # Directly verify PE14 in model matches PE14 in checkpoint file
+        raw_ckpt = torch.load(locked_base_path, map_location="cpu", weights_only=False)
+        raw_sd = raw_ckpt.get("model_state_dict", raw_ckpt.get("state_dict", raw_ckpt))
+        assert "backbone.positional_embeddings" in raw_sd, "Checkpoint missing 'backbone.positional_embeddings'!"
+        ckpt_pe14 = raw_sd["backbone.positional_embeddings"]
+        assert torch.equal(model.backbone.positional_embeddings.cpu(), ckpt_pe14), (
+            f"Run {p3_mode}: Model positional_embeddings does not match checkpoint positional_embeddings!"
+        )
+        locked_base_ingested = True
+        locked_base_provenance = f"VERIFIED ({os.path.basename(locked_base_path)})"
+        print(f"  Locked Base Provenance: VERIFIED from {os.path.basename(locked_base_path)}.")
+    else:
+        locked_base_provenance = "NOT_PROVEN (ImageNet fallback; missing --locked-base)"
+        print("  WARNING: No locked-base checkpoint specified. PE28 derived from default ImageNet PE14.")
 
     # Verify PE28 initial buffer state & exact mathematical derivation from PE14
     assert hasattr(model.backbone, "pe28_fixed"), "Model lacks pe28_fixed buffer!"
@@ -517,6 +537,8 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
         'p3_grad_status': p3_grad_status,
         'pe28_status': pe28_status,
         'pe28_tensor': pe28.cpu().clone(),
+        'locked_base_provenance': locked_base_provenance,
+        'locked_base_ingested': locked_base_ingested,
     }
 
     print(f"\n--> PREFLIGHT SUMMARY FOR {run_id}: ALL 24 INVARIANT CHECKS PASSED!\n")
@@ -607,12 +629,20 @@ def main():
             ("K. NaN / Inf status", rA['nan_inf_status'], rB['nan_inf_status'], rC['nan_inf_status']),
             ("L. P3 gradient status", rA['p3_grad_status'], rB['p3_grad_status'], rC['p3_grad_status']),
             ("M. PE28 fixed buffer status", rA['pe28_status'], rB['pe28_status'], rC['pe28_status']),
+            ("N. Locked Base provenance", rA['locked_base_provenance'], rB['locked_base_provenance'], rC['locked_base_provenance']),
         ]
         for name, a, b, c in rows:
             print(f"| {name:<32} | {a:<16} | {b:<18} | {c:<16} |")
         print(sep)
 
-    final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = PASS" if all_passed and len(all_results) == 3 else "REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED"
+    all_locked_base_verified = all(r.get('locked_base_ingested', False) for r in all_results)
+    if all_passed and len(all_results) == 3:
+        if all_locked_base_verified:
+            final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
+        else:
+            final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = GATED (Locked Base Checkpoint required; please supply --locked-base)"
+    else:
+        final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED"
     print(f"\n{final_verdict}\n")
 
 if __name__ == "__main__":
