@@ -122,6 +122,8 @@ def compute_preflight_verdict(all_passed: bool, results: list) -> str:
         elif mode == "C":
             # P3-C is standalone by protocol; no parent checkpoint required.
             continue
+        else:
+            return f"REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED (Unknown P3 mode: {mode})"
 
     return "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
 
