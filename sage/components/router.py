@@ -288,11 +288,23 @@ class SageRouter(nn.Module):
         # Compute load balance loss
         full_probs_for_loss = F.softmax(modulated_logits, dim=-1)
         load_balance_loss = self.compute_load_balance_loss(full_probs_for_loss)
-        
+
+        # Step 6b: Compute lightweight scalar routing entropy across full batch:
+        # H = mean_b[-sum_k p_bk * log2(p_bk)]
+        if B > 0 and self.top_k > 0:
+            weights_sum = gating_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            norm_p = gating_weights / weights_sum
+            log2_p = torch.log2(norm_p.clamp(min=1e-8))
+            sample_entropies = -(norm_p * log2_p).sum(dim=-1)
+            routing_entropy_mean = float(sample_entropies.mean().item())
+        else:
+            routing_entropy_mean = 0.0
+
         # Prepare routing info
         routing_info = {
             'load_balance_loss': load_balance_loss,
             'g_s_score_sample_0': g_s[0].item(),
+            'routing_entropy_mean': routing_entropy_mean,
         }
         
         # Add detailed eval information for debugging (only in eval mode)

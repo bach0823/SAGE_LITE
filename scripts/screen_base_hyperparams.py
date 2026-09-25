@@ -101,9 +101,8 @@ def get_git_commit_hash() -> str:
 
 def compute_sample_gating_entropy(routing_infos: Any) -> float:
     """
-    Computes sample-level routing entropy H_routing = -sum(p_k * log2(p_k))
-    from the normalized top-k gating weights across all active SAGE layers.
-    For top-k=4, theoretical max is log2(4) = 2.0 bits.
+    Aggregates the lightweight scalar 'routing_entropy_mean' computed across the full batch
+    by each active SAGE router: H = mean_b[-sum_k p_bk * log2(p_bk)].
     """
     if isinstance(routing_infos, dict):
         infos = routing_infos.get('all', [])
@@ -114,14 +113,8 @@ def compute_sample_gating_entropy(routing_infos: Any) -> float:
 
     entropies = []
     for info in infos:
-        if isinstance(info, dict) and 'gating_weights_sample_0' in info:
-            w = np.array(info['gating_weights_sample_0'], dtype=np.float64)
-            s = float(w.sum())
-            if s > 1e-8:
-                p = w / s
-                p_pos = p[p > 1e-8]
-                h = -float(np.sum(p_pos * np.log2(p_pos)))
-                entropies.append(h)
+        if isinstance(info, dict) and 'routing_entropy_mean' in info:
+            entropies.append(float(info['routing_entropy_mean']))
     return float(np.mean(entropies)) if entropies else 0.0
 
 
@@ -311,7 +304,7 @@ def run_screening_trial(
     stage1_final_val_dice = 0.0
     stage1_final_val_loss = float('inf')
     stage1_best_val_dice = -1.0
-    stage1_best_val_loss = float('inf')
+    stage1_val_loss_at_best_dice = float('inf')
     best_stage1_weights = None
     s1_sample_entropies = []
 
@@ -406,7 +399,7 @@ def run_screening_trial(
 
         if val_dice > stage1_best_val_dice:
             stage1_best_val_dice = val_dice
-            stage1_best_val_loss = val_loss
+            stage1_val_loss_at_best_dice = val_loss
             best_stage1_weights = copy.deepcopy(model.state_dict())
 
         print(
@@ -456,8 +449,8 @@ def run_screening_trial(
     stage2_final_val_loss = float('inf')
     stage2_final_val_iou = 0.0
     stage2_best_val_dice = -1.0
-    stage2_best_val_loss = float('inf')
-    stage2_best_val_iou = 0.0
+    stage2_val_loss_at_best_dice = float('inf')
+    stage2_val_iou_at_best_dice = 0.0
     s2_sample_entropies = []
 
     for epoch in range(1, stage2_epochs + 1):
@@ -551,8 +544,8 @@ def run_screening_trial(
 
         if val_dice > stage2_best_val_dice:
             stage2_best_val_dice = val_dice
-            stage2_best_val_loss = val_loss
-            stage2_best_val_iou = val_iou
+            stage2_val_loss_at_best_dice = val_loss
+            stage2_val_iou_at_best_dice = val_iou
 
         print(
             f"  [Stage 2][Epoch {epoch:02d}/{stage2_epochs:02d}] "
@@ -579,18 +572,18 @@ def run_screening_trial(
         "lb_factor": lb_factor,
         "expert_dropout": expert_dropout,
         "residual_scale": residual_scale,
-        # Stage 1 metrics (Final & Best)
+        # Stage 1 metrics (Final & at Best Dice)
         "s1_final_val_dice": round(stage1_final_val_dice, 4),
         "s1_final_val_loss": round(stage1_final_val_loss, 4),
         "s1_best_val_dice": round(stage1_best_val_dice, 4),
-        "s1_best_val_loss": round(stage1_best_val_loss, 4),
-        # Stage 2 metrics (Final & Best)
+        "s1_val_loss_at_best_dice": round(stage1_val_loss_at_best_dice, 4),
+        # Stage 2 metrics (Final & at Best Dice)
         "s2_final_val_dice": round(stage2_final_val_dice, 4),
         "s2_final_val_loss": round(stage2_final_val_loss, 4),
         "s2_final_val_iou": round(stage2_final_val_iou, 4),
         "s2_best_val_dice": round(stage2_best_val_dice, 4),
-        "s2_best_val_loss": round(stage2_best_val_loss, 4),
-        "s2_best_val_iou": round(stage2_best_val_iou, 4),
+        "s2_val_loss_at_best_dice": round(stage2_val_loss_at_best_dice, 4),
+        "s2_val_iou_at_best_dice": round(stage2_val_iou_at_best_dice, 4),
         # Entropy & Expert metrics
         "expert_utilization_entropy": routing_stats['expert_utilization_entropy'],
         "sample_routing_entropy": round(avg_sample_entropy, 4),
@@ -629,11 +622,13 @@ def main():
     parser.add_argument("--num-workers", type=int, default=2,
                         help="DataLoader worker processes (default: 2)")
     parser.add_argument("--stage1-epochs", type=int, default=3,
-                        help="Number of epochs for Stage 1 screening (default: 3)")
+                        help="Number of epochs for Stage 1 short-horizon screening (default: 3)")
     parser.add_argument("--stage2-epochs", type=int, default=3,
-                        help="Number of epochs for Stage 2 screening (default: 3)")
+                        help="Number of epochs for Stage 2 short-horizon screening (default: 3)")
     parser.add_argument("--warmup-epochs", type=int, default=1,
-                        help="Warmup epochs for cosine scheduler (default: 1)")
+                        help="Screening-specific warmup epochs (default: 1 for short-horizon screening; note that canonical full confirmation uses warmup=3)")
+    parser.add_argument("--confirmation-epochs", type=int, default=None,
+                        help="Optional canonical confirmation epoch count to compute full-training extrapolation (default: None, no hardcoded extrapolation)")
 
     # Hyperparameter Screening Parameters
     parser.add_argument("--lr", type=float, default=None,
@@ -789,15 +784,15 @@ def main():
 
     # Generate Markdown Summary Report
     avg_ep_sec_all = float(np.mean([r['mean_epoch_time_s'] for r in results])) if results else 0.0
-    est_full_train_hours = (avg_ep_sec_all * 30.0) / 3600.0
 
     md_lines = [
         "# SAGE-Lite B2 Phase 1 Base Model Hyperparameter Screening Report",
         "",
         "> [!IMPORTANT]",
-        "> **Bản chất Thử nghiệm: Short-Horizon Screening**",
-        f"> Thử nghiệm này chạy với ngân sách ngắn hạn (Stage 1 = {args.stage1_epochs} epochs, Stage 2 = {args.stage2_epochs} epochs) nhằm phát hiện vùng siêu tham số ổn định, loại bỏ các cấu hình phân kỳ hoặc router collapse.",
-        "> Kết quả dùng để sàng lọc danh sách candidate(s) tiềm năng nhất; ứng viên được chọn cần được xác nhận bằng lượt huấn luyện đầy đủ trước khi sinh Locked Base Checkpoint chính thức.",
+        "> **Bản chất Thử nghiệm: Short-Horizon Screening vs Canonical Confirmation**",
+        f"> - **Screening-specific protocol**: Stage 1 = {args.stage1_epochs} epochs (warmup = {args.warmup_epochs} epoch), Stage 2 = {args.stage2_epochs} epochs (warmup = {args.warmup_epochs} epoch) nhằm phát hiện nhanh vùng siêu tham số ổn định và loại bỏ cấu hình phân kỳ.",
+        "> - **Canonical Confirmation protocol**: Lượt huấn luyện đầy đủ chính thức sẽ áp dụng chuẩn `warmup = 3` epochs cho scheduler.",
+        "> - Kết quả screening dùng để xếp hạng và chọn ra ứng viên tiềm năng nhất; ứng viên được chọn cần được xác nhận bằng canonical full-length training trước khi đóng băng Locked Base Checkpoint.",
         "",
         f"*Execution Date: {time.strftime('%Y-%m-%d %H:%M:%S')}*",
         f"*Hardware: {dev_name} ({total_vram_gb:.2f} GB VRAM)*",
@@ -818,7 +813,7 @@ def main():
     for rank, r in enumerate(results, 1):
         s1_dice_str = f"{r['s1_final_val_dice']:.4f} ({r['s1_best_val_dice']:.4f})"
         s2_dice_str = f"**{r['s2_final_val_dice']:.4f}** ({r['s2_best_val_dice']:.4f})"
-        s2_iou_str = f"{r['s2_final_val_iou']:.4f} ({r['s2_best_val_iou']:.4f})"
+        s2_iou_str = f"{r['s2_final_val_iou']:.4f} ({r['s2_val_iou_at_best_dice']:.4f})"
         vram_str = f"{r['peak_allocated_mb']:.0f} / {r['peak_reserved_mb']:.0f} MB"
         time_str = f"{r['mean_epoch_time_s']:.1f}s"
         experts_str = f"{r['active_experts']}/{r.get('pool_size', 16)} ({r['expert_utilization_pct']}%)"
@@ -835,7 +830,7 @@ def main():
         "",
         "## 2. Nhận Xét Khoa Học & Phân Tích Kỹ Thuật",
         "",
-        f"1. **Ứng viên Dẫn đầu (Top Pick):** `{results[0]['candidate_id']}` đạt **S2 Final Val Dice = {results[0]['s2_final_val_dice']:.4f}** (Best: {results[0]['s2_best_val_dice']:.4f}) và **S2 Final IoU = {results[0]['s2_final_val_iou']:.4f}**.",
+        f"1. **Ứng viên Dẫn đầu (Top Pick):** `{results[0]['candidate_id']}` đạt **S2 Final Val Dice = {results[0]['s2_final_val_dice']:.4f}** (Best: {results[0]['s2_best_val_dice']:.4f}) và **S2 Final IoU = {results[0]['s2_final_val_iou']:.4f}** (tại epoch Best Dice: Val Loss = {results[0]['s2_val_loss_at_best_dice']:.4f}, Val IoU = {results[0]['s2_val_iou_at_best_dice']:.4f}).",
         f"2. **Độ ổn định số học (Numerical Stability):** Trạng thái NaN/Inf toàn bộ candidate: `{results[0]['nan_inf_status']}`.",
         f"3. **Expert Utilization Entropy ($H_{{usage}}$) vs Sample Routing Entropy ($H_{{routing}}$):**",
         f"   - $H_{{usage}}$ trung bình: `{results[0]['expert_utilization_entropy']:.2f}` bits / 4.0 bits tối đa (thể hiện mức độ dàn trải việc chọn chuyên gia trên toàn bộ pool experts).",
@@ -843,7 +838,13 @@ def main():
         f"   - Số lượng chuyên gia hoạt động: `{results[0]['active_experts']}/{results[0].get('pool_size', 16)}` ({results[0]['expert_utilization_pct']}%).",
         f"4. **Đo lường Tốc độ Thực tế (Empirical Timing):**",
         f"   - Thời gian thực tế đo được trên môi trường: **{avg_ep_sec_all:.1f} giây / epoch** ({avg_ep_sec_all / 60.0:.2f} phút / epoch).",
-        f"   - Ước tính ngân sách chạy full training 30 epoch (12 Stage 1 + 18 Stage 2): **xấp xỉ {est_full_train_hours:.2f} giờ**.",
+    ])
+
+    if args.confirmation_epochs is not None:
+        est_conf_hours = (avg_ep_sec_all * args.confirmation_epochs) / 3600.0
+        md_lines.append(f"   - Ước tính ngân sách thời gian cho {args.confirmation_epochs} epochs confirmation (dựa trên tốc độ thực tế): **xấp xỉ {est_conf_hours:.2f} giờ**.")
+
+    md_lines.extend([
         "5. **Bước tiếp theo trong Lộ trình:** Khóa siêu tham số tiềm năng nhất và tiến hành xác nhận trước khi chuyển sang Step 2 (`top_k` screening).",
         "",
     ])
