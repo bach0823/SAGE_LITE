@@ -63,6 +63,8 @@ from scripts.train_crack import (
     get_scheduler,
     CrackBinaryLoss,
     DEFAULT_SHARED_PREFIXES,
+    set_p3_gamma_init,
+    get_p3_gamma_values,
 )
 from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
 
@@ -108,11 +110,20 @@ def compute_file_sha256(filepath: str) -> str:
 def compute_preflight_verdict(all_passed: bool, results: list) -> str:
     if not all_passed or len(results) == 0:
         return "REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED"
-    all_locked_base_verified = all(r.get('locked_base_ingested', False) for r in results)
-    if all_locked_base_verified:
-        return "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
-    else:
-        return "REAL-DATA P3 LAUNCH PREFLIGHT = GATED (Locked Base Checkpoint required; please supply --locked-base)"
+
+    for r in results:
+        mode = r.get("p3_mode")
+        if mode in ("A", "B"):
+            if not r.get("locked_base_ingested", False):
+                return (
+                    "REAL-DATA P3 LAUNCH PREFLIGHT = GATED "
+                    "(Locked Base Checkpoint required for Run A/B; please supply --locked-base)"
+                )
+        elif mode == "C":
+            # P3-C is standalone by protocol; no parent checkpoint required.
+            continue
+
+    return "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
 
 
 def run_single_preflight(
@@ -215,14 +226,26 @@ def run_single_preflight(
     ).to(device)
     model.train() # Exploration noise and expert dropout active
 
-    # P3-C standalone protocol: locked-base is optional legacy functionality; no parent is required.
+    # Initialize P3 refinement gamma if applicable
+    if p3_mode in ("B", "C"):
+        gamma_init_val = float(cfg.get('gamma_init', 0.01))
+        set_p3_gamma_init(model, gamma_init_val)
+        g0, g1 = get_p3_gamma_values(model)
+        print(f"  P3 refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
+
+    # P3-C standalone protocol: locked-base is not applicable; no parent checkpoint is ingested.
     locked_base_path = resolve_locked_base_path(cfg, locked_base_override=locked_base_override)
-    locked_base_provenance = "NOT_PROVEN"
+    locked_base_provenance = "NOT_APPLICABLE (Standalone P3-C)" if p3_mode == "C" else "NOT_PROVEN"
     locked_base_ingested = False
     ckpt_sha256 = None
     ckpt_basename = None
 
-    if locked_base_path:
+    if p3_mode == "C":
+        if locked_base_path:
+            print(f"  [Notice] Run C (P3-C ASDW) is a Standalone Base Model. Parent checkpoint '{locked_base_path}' is ignored (not ingested).")
+        else:
+            print("  Run C (P3-C ASDW) is Standalone: ImageNet-pretrained initialization, no parent checkpoint required.")
+    elif locked_base_path:
         if not os.path.exists(locked_base_path):
             raise FileNotFoundError(f"Locked base checkpoint not found at: {locked_base_path}")
 
@@ -293,11 +316,13 @@ def run_single_preflight(
 
     # 4. Stage 1 Optimizer Setup
     base_lr = float(cfg.get('lr', 1e-4))
+    p3_lr = float(cfg.get('p3_lr', base_lr))
     stage1_groups = get_optimizer_groups(
         model,
         lr_backbone=base_lr * 0.1,
         lr_decoder=base_lr,
         lr_sage=base_lr,
+        lr_p3=p3_lr,
         weight_decay=0.05,
     )
     opt1 = optim.AdamW(stage1_groups)
@@ -424,16 +449,23 @@ def run_single_preflight(
     # Build Stage-2 optimizer
     stage2_base_lr = float(cfg.get('stage2_base_lr', 1e-4))
     stage2_shared_lr = float(cfg.get('stage2_shared_lr', 1e-4))
+    stage2_p3_lr = float(cfg.get('stage2_p3_lr', p3_lr))
     assert abs(stage2_shared_lr / stage2_base_lr - 1.0) < 1e-6, "Stage-2 LR ratio must be 1:1!"
-    print(f"  Stage 2 LRs Verified: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e} (Ratio: 1.00)")
+    print(f"  Stage 2 LRs Verified: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e} (Shared:Base Ratio: 1.00)")
 
-    opt2 = create_stage2_optimizer(model2, stage2_base_lr=stage2_base_lr, stage2_shared_lr=stage2_shared_lr)
+    opt2 = create_stage2_optimizer(
+        model2,
+        stage2_base_lr=stage2_base_lr,
+        stage2_shared_lr=stage2_shared_lr,
+        stage2_p3_lr=stage2_p3_lr,
+    )
 
     # Verify Stage-2 parameter grouping
     param_id_to_name2 = {id(p): name for name, p in model2.named_parameters()}
     trainable_p2 = [p for p in model2.parameters() if p.requires_grad]
     all_opt2_p = []
     shared_opt_p = []
+    p3_opt_p = []
     other_opt_p = []
 
     for g_idx, grp in enumerate(opt2.param_groups):
@@ -442,6 +474,9 @@ def run_single_preflight(
         if "shared" in g_name:
             shared_opt_p.extend(grp['params'])
             assert grp['lr'] == stage2_shared_lr, f"Shared group LR {grp['lr']} != {stage2_shared_lr}"
+        elif "p3" in g_name:
+            p3_opt_p.extend(grp['params'])
+            assert grp['lr'] == stage2_p3_lr, f"P3 group LR {grp['lr']} != {stage2_p3_lr}"
         else:
             other_opt_p.extend(grp['params'])
             assert grp['lr'] == stage2_base_lr, f"Other group LR {grp['lr']} != {stage2_base_lr}"
@@ -459,11 +494,15 @@ def run_single_preflight(
     print(f"  Stage 2 Shared Experts: All {len(shared_param_names)} parameters confirmed as CNN main_blocks (requires_grad=True).")
 
     # Verify P3 membership in Stage 2
-    for n, p in model2.named_parameters():
-        if "p3_refinement" in n:
-            assert id(p) in [id(x) for x in other_opt_p], f"P3 param {n} must belong to other_and_routers!"
-            assert id(p) not in [id(x) for x in shared_opt_p], f"P3 param {n} illegally in shared_experts!"
-    print(f"  Stage 2 P3 Membership: All P3 parameters confirmed strictly in other_and_routers.")
+    if p3_mode in ("B", "C"):
+        for n, p in model2.named_parameters():
+            if "p3_refinement" in n:
+                assert id(p) in [id(x) for x in p3_opt_p], f"P3 param {n} must belong to p3_refinement group!"
+                assert id(p) not in [id(x) for x in shared_opt_p], f"P3 param {n} illegally in shared_experts!"
+        print(f"  Stage 2 P3 Membership: All P3 parameters confirmed strictly in dedicated p3_refinement tier.")
+    else:
+        assert len(p3_opt_p) == 0, f"Run A must have 0 P3 parameters in opt2, got {len(p3_opt_p)}"
+        print("  Stage 2 P3 Membership: 0 P3 parameters for Run A (Identity).")
 
     # Verify Scheduler recreated with warmup=3
     scheduler2 = get_scheduler(opt2, epochs=15, warmup_epochs=3)
@@ -629,7 +668,7 @@ def run_single_preflight(
         'locked_base_provenance': locked_base_provenance,
         'locked_base_ingested': locked_base_ingested,
         'checkpoint_sha256': ckpt_sha256,
-        'checkpoint_sha256_short': (str(ckpt_sha256)[:12] + "...") if ckpt_sha256 else "None",
+        'checkpoint_sha256_short': (str(ckpt_sha256)[:12] + "...") if ckpt_sha256 else ("N/A (Standalone)" if p3_mode == "C" else "None"),
         'checkpoint_basename': ckpt_basename,
     }
 
