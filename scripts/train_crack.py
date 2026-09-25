@@ -4,7 +4,7 @@ import os
 import sys
 import yaml
 from tqdm import tqdm
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -41,26 +41,56 @@ DEFAULT_SHARED_PREFIXES = {
 }
 
 
+def set_p3_gamma_init(model: nn.Module, gamma_val: float):
+    """Initializes gamma parameters in all P3 refinement stages to the specified value."""
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'convnext') and hasattr(model.backbone.convnext, 'stages'):
+        for stage in model.backbone.convnext.stages:
+            if hasattr(stage, 'p3_refinement') and stage.p3_refinement is not None:
+                if hasattr(stage.p3_refinement, 'gamma'):
+                    with torch.no_grad():
+                        stage.p3_refinement.gamma.fill_(gamma_val)
+
+
+def get_p3_gamma_values(model: nn.Module) -> Tuple[float, float]:
+    """Retrieves current gamma values for Stage 0 and Stage 1."""
+    g0, g1 = float('nan'), float('nan')
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'convnext') and hasattr(model.backbone.convnext, 'stages'):
+        stages = model.backbone.convnext.stages
+        if len(stages) > 0 and hasattr(stages[0], 'p3_refinement') and stages[0].p3_refinement is not None:
+            if hasattr(stages[0].p3_refinement, 'gamma'):
+                g0 = float(stages[0].p3_refinement.gamma.item())
+        if len(stages) > 1 and hasattr(stages[1], 'p3_refinement') and stages[1].p3_refinement is not None:
+            if hasattr(stages[1].p3_refinement, 'gamma'):
+                g1 = float(stages[1].p3_refinement.gamma.item())
+    return g0, g1
+
+
 def create_stage2_optimizer(
     model: nn.Module,
     stage2_base_lr: float,
     stage2_shared_lr: float,
+    stage2_p3_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
 ) -> optim.Optimizer:
     """
     Construct Stage-2 optimizer parameter groups according to SAGE-Lite protocol:
     - Shared experts (CNN main_block stages): stage2_shared_lr
+    - P3 refinement (ASDW / Generic DW): stage2_p3_lr (defaults to stage2_base_lr)
     - Other components (ViT blocks, routers, SA-Hub adapters, decoder, bridge layers): stage2_base_lr
-    - Weight decay: 0.0 for LayerNorm/Norm and biases; weight_decay (0.05) for weights.
+    - Weight decay: 0.0 for LayerNorm/Norm, biases, and gamma; weight_decay (0.05) for weights.
     - All trainable parameters retain requires_grad=True (no freezing).
     """
+    if stage2_p3_lr is None:
+        stage2_p3_lr = stage2_base_lr
     if shared_prefixes is None:
         shared_prefixes = DEFAULT_SHARED_PREFIXES
 
     groups = {
         'shared_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
         'shared_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
+        'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
+        'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
         'others_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
         'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
     }
@@ -77,13 +107,17 @@ def create_stage2_optimizer(
         if not param.requires_grad:
             continue
 
-        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias')
-        is_shared = (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes)
-        tier = 'shared' if is_shared else 'others'
+        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias') or 'gamma' in name.lower()
+
+        if 'p3_refinement' in name:
+            tier = 'p3'
+        elif (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes):
+            tier = 'shared'
+        else:
+            tier = 'others'
 
         group_key = f"{tier}_no_decay" if is_no_decay else f"{tier}_decay"
         groups[group_key]['params'].append(param)
-
 
     param_groups = [g for g in groups.values() if len(g['params']) > 0]
 
@@ -102,16 +136,19 @@ def create_stage2_optimizer(
 
     return optim.AdamW(param_groups)
 
-def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, weight_decay=0.05):
+def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=None, weight_decay=0.05):
     """
     Construct optimizer parameter groups categorized by learning rate tiers and weight decay:
     - Backbone (pretrained ConvNeXt stages and ViT blocks): lr_backbone (1e-5)
     - Decoder & Interface (UNet decoder and newly initialized hybrid bridge layers): lr_decoder (1e-4)
     - SAGE components (routers, SA-Hub adapters, adaptive fusion alpha): lr_sage (1e-4)
-    - Weight decay: 0.0 for LayerNorm/Norm and biases; weight_decay (0.05) for weights.
+    - P3 refinement (ASDW / Generic DW): lr_p3 (1e-4)
+    - Weight decay: 0.0 for LayerNorm/Norm, biases, and gamma; weight_decay (0.05) for weights.
     """
     if lr_sage is None:
         lr_sage = lr_decoder
+    if lr_p3 is None:
+        lr_p3 = lr_decoder
 
     # Interface / bridge layers between ConvNeXt and ViT are newly initialized (NOT pretrained)
     interface_keys = (
@@ -128,15 +165,19 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, weight_de
         'decoder_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_decoder, 'name': 'decoder'},
         'sage_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_sage, 'name': 'sage'},
         'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_sage, 'name': 'sage'},
+        'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_p3, 'name': 'p3_refinement'},
+        'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_p3, 'name': 'p3_refinement'},
     }
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
             
-        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias')
+        is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias') or 'gamma' in name.lower()
         
-        if 'router' in name or 'sa_hub' in name or 'alpha' in name:
+        if 'p3_refinement' in name:
+            tier = 'p3'
+        elif 'router' in name or 'sa_hub' in name or 'alpha' in name:
             tier = 'sage'
         elif name.startswith('decoder') or any(k in name for k in interface_keys):
             tier = 'decoder'
@@ -203,14 +244,36 @@ def main(args):
     config_path = args.config
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-        
+
+    # 1. Apply CLI Overrides to configuration
+    if getattr(args, 'data_root', None):
+        config['root_dir'] = args.data_root
+    if getattr(args, 'depth', None) is not None:
+        config['num_transformer_layers'] = args.depth
+    if getattr(args, 'batch_size', None) is not None:
+        config['batch_size'] = args.batch_size
+    if getattr(args, 'num_workers', None) is not None:
+        config['num_workers'] = args.num_workers
+    if getattr(args, 'lr', None) is not None:
+        config['lr'] = args.lr
+    if getattr(args, 'p3_lr', None) is not None:
+        config['p3_lr'] = args.p3_lr
+    if getattr(args, 'gamma_init', None) is not None:
+        config['gamma_init'] = args.gamma_init
+    if getattr(args, 'epochs', None) is not None:
+        config['epochs'] = args.epochs
+    if getattr(args, 'warmup_epochs', None) is not None:
+        config['warmup_epochs'] = args.warmup_epochs
+    if getattr(args, 'output_dir', None) is not None:
+        config['output_dir'] = args.output_dir
+
     set_seed(config.get('seed', 42))
-    
+
     output_dir = config.get('output_dir', 'results/runs')
     os.makedirs(output_dir, exist_ok=True)
     logger = setup_logging(output_dir, experiment_name='train')
     logger.info(f"Loaded config from {config_path}")
-    
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
         dev_name = torch.cuda.get_device_name(0)
@@ -218,20 +281,20 @@ def main(args):
             torch.backends.cudnn.enabled = False
             logger.info(f"Detected {dev_name}. Set torch.backends.cudnn.enabled = False for FP16 numerical stability.")
     logger.info(f"Using device: {device}")
-    
+
     img_size = config.get('img_size', 448)
     batch_size = config.get('batch_size', 20)
     num_workers = config.get('num_workers', 4)
-    
-    train_dataset = get_dataset_from_config(config_path, split='train', image_size=img_size)
+
+    train_dataset = get_dataset_from_config(config, split='train', image_size=img_size)
     from evaluate_crack_official import get_image_mask_pairs, evaluate_split, resolve_protocol
     val_pairs = get_image_mask_pairs(config, 'val')
     eval_protocol = resolve_protocol(config)
     logger.info(f"Evaluation protocol for validation: {eval_protocol}")
-    
+
     g = torch.Generator()
     g.manual_seed(config.get('seed', 42))
-    
+
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
@@ -239,10 +302,10 @@ def main(args):
         num_workers=num_workers,
         worker_init_fn=seed_worker,
         generator=g,
-        pin_memory=True,
+        pin_memory=(device.type == 'cuda'),
         drop_last=False
     )
-    
+
     p3_mode = config.get('p3_mode', None)
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
@@ -265,17 +328,20 @@ def main(args):
         logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, and p3_mode='{p3_mode}'")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
-        
+
     logger.info(f"Initialized {model_type} model")
 
     # Ingest locked-base checkpoint or pre-trained checkpoint if provided
     locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
     generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
 
-    if p3_mode is not None:
+    # Standalone vs Locked-Base Invariant Handling
+    if p3_mode == "C":
+        logger.info("P3-C Standalone Initialization: ImageNet-pretrained, no parent checkpoint")
+    elif p3_mode in ("A", "B"):
         if not locked_base_path:
             raise ValueError(
-                f"P3 training (p3_mode='{p3_mode}') requires an explicit Locked Base checkpoint "
+                f"P3 ablation training (p3_mode='{p3_mode}') requires an explicit Locked Base checkpoint "
                 "via --locked-base or 'locked_base_checkpoint' in YAML config. "
                 "Generic --checkpoint cannot be used to initialize or bypass Locked Base provenance."
             )
@@ -286,7 +352,7 @@ def main(args):
                 "Locked Base provenance, and --checkpoint is strictly for resume/continue."
             )
 
-    if locked_base_path:
+    if locked_base_path and p3_mode != "C":
         from sage.utils.model_utils import load_locked_base_into_p3
         from scripts.preflight_p3_realdata import compute_file_sha256, EXPECTED_LOCKED_BASE_SHA256
         sha = compute_file_sha256(locked_base_path)
@@ -302,44 +368,53 @@ def main(args):
         sd = ckpt.get('model_state_dict', ckpt)
         model.load_state_dict(sd, strict=False)
 
+    # Initialize gamma parameters for P3
+    gamma_init_val = float(config.get('gamma_init', 0.01))
+    if p3_mode is not None:
+        set_p3_gamma_init(model, gamma_init_val)
+        g0, g1 = get_p3_gamma_values(model)
+        logger.info(f"P3 Refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
+
     criterion = CrackBinaryLoss()
-    scaler = torch.amp.GradScaler('cuda')
-    
+    scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
+
     base_lr = float(config.get('lr', 1e-4))
+    p3_lr = float(config.get('p3_lr', base_lr))
+    warmup_epochs = int(config.get('warmup_epochs', 3))
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
     lr_sage = base_lr
-    
+
     two_stage = getattr(args, 'two_stage', False) or config.get('two_stage', False)
-    
+
     if not two_stage:
         logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
         total_epochs = int(config.get('epochs', 30))
         patience = int(config.get('patience', 6))
-        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}")
-        
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
+        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, P3 LR: {p3_lr}")
+
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
-        scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=3)
-        
+        scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=warmup_epochs)
+
         best_dice = 0.0
         best_loss = float('inf')
         epochs_no_improve = 0
-        
+
         for epoch in range(1, total_epochs + 1):
             model.train()
             train_loss = 0.0
             train_lb_loss = 0.0
             train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
-            
+
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs} [Train]")
             for batch in pbar:
                 images = batch['image'].to(device, non_blocking=True)
                 labels = batch['label'].to(device, non_blocking=True)
-                
+
                 optimizer.zero_grad(set_to_none=True)
-                
-                with torch.amp.autocast('cuda'):
+
+                with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda')):
                     if hasattr(model, 'forward_with_routing_info'):
                         forward_out = model.forward_with_routing_info(images)
                         logits = forward_out['logits']
@@ -350,11 +425,11 @@ def main(args):
                         lb_loss = torch.tensor(0.0, device=device)
                     seg_loss = criterion(logits, labels)
                     loss = seg_loss + 1.0 * lb_loss
-                    
+
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                
+
                 train_loss += loss.item()
                 train_lb_loss += lb_loss.item()
                 with torch.no_grad():
@@ -363,28 +438,32 @@ def main(args):
                     train_acc += acc
                     train_dice += dice
                     train_iou += iou
-                    
+
                 pbar.set_postfix({'loss': f"{loss.item():.4f}", 'dice': f"{dice:.4f}", 'lb': f"{lb_loss.item():.4f}"})
-                
+
             scheduler.step(epoch)
-            
+
             model.eval()
             with torch.no_grad():
                 val_metrics = evaluate_split(model, val_pairs, device, protocol=eval_protocol, tile_size=img_size, criterion=criterion, verbose=False)
-                
+
             val_loss = val_metrics['loss']
             val_dice = val_metrics['dice']
-            
+
             train_loss /= len(train_loader)
             train_dice /= len(train_loader)
             train_lb_loss /= len(train_loader)
-            
+
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
             sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
+            p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
             lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
             if sage_lr is not None:
                 lr_str += f", SAGE={sage_lr:.2e}"
+            if p3_lr_cur is not None:
+                g0, g1 = get_p3_gamma_values(model)
+                lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
             logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
             is_best = False
@@ -501,13 +580,19 @@ def main(args):
 
             stage2_base_lr = float(config.get("stage2_base_lr", base_lr))
             stage2_shared_lr = float(config.get("stage2_shared_lr", base_lr))
-            logger.info(f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}")
-            optimizer = create_stage2_optimizer(model, stage2_base_lr=stage2_base_lr, stage2_shared_lr=stage2_shared_lr)
+            stage2_p3_lr = float(config.get("stage2_p3_lr", p3_lr))
+            logger.info(f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e}")
+            optimizer = create_stage2_optimizer(
+                model,
+                stage2_base_lr=stage2_base_lr,
+                stage2_shared_lr=stage2_shared_lr,
+                stage2_p3_lr=stage2_p3_lr,
+            )
         else:
-            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, weight_decay=0.05)
+            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
             optimizer = optim.AdamW(param_groups)
 
-        scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=3)
+        scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=warmup_epochs)
         
         best_stage_dice = 0.0
         best_stage_loss = float('inf')
@@ -528,7 +613,7 @@ def main(args):
                 
                 optimizer.zero_grad(set_to_none=True)
                 
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda')):
                     if hasattr(model, 'forward_with_routing_info'):
                         forward_out = model.forward_with_routing_info(images)
                         logits = forward_out['logits']
@@ -571,14 +656,23 @@ def main(args):
             if stage == 2:
                 sh_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), 0.0)
                 oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'other_and_routers'), 0.0)
+                p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
                 lr_str = f"Shared={sh_lr:.2e}, Others={oth_lr:.2e}"
+                if p3_lr_cur is not None:
+                    lr_str += f", P3={p3_lr_cur:.2e}"
             else:
                 bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
                 dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
                 sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
+                p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
                 lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
                 if sage_lr is not None:
                     lr_str += f", SAGE={sage_lr:.2e}"
+                if p3_lr_cur is not None:
+                    lr_str += f", P3={p3_lr_cur:.2e}"
+            g0, g1 = get_p3_gamma_values(model)
+            if g0 is not None or g1 is not None:
+                lr_str += f" (gamma: S0={g0:.4f}, S1={g1:.4f})"
 
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
@@ -601,9 +695,14 @@ def main(args):
                     'model_state_dict': model.state_dict(),
                     'best_dice': float(best_stage_dice),
                     'best_loss': float(best_stage_loss),
+                    'model_type': model_type,
                 }
-                if model_type == 'B2' and p3_mode is not None:
-                    stage_ckpt_data['p3_mode'] = p3_mode
+                if model_type in ['B1', 'B2']:
+                    stage_ckpt_data['num_transformer_layers'] = vit_depth
+                if model_type == 'B2':
+                    stage_ckpt_data['sage_config'] = sage_cfg
+                    if p3_mode is not None:
+                        stage_ckpt_data['p3_mode'] = p3_mode
                 torch.save(stage_ckpt_data, ckpt_path)
                 logger.info(f"New best Stage {stage} model saved with Val Dice: {best_stage_dice:.4f} and Val Loss: {best_stage_loss:.4f}")
                 
@@ -624,9 +723,14 @@ def main(args):
                         'model_state_dict': model.state_dict(),
                         'best_dice': float(global_best_dice),
                         'best_loss': float(global_best_loss),
+                        'model_type': model_type,
                     }
-                    if model_type == 'B2' and p3_mode is not None:
-                        global_ckpt_data['p3_mode'] = p3_mode
+                    if model_type in ['B1', 'B2']:
+                        global_ckpt_data['num_transformer_layers'] = vit_depth
+                    if model_type == 'B2':
+                        global_ckpt_data['sage_config'] = sage_cfg
+                        if p3_mode is not None:
+                            global_ckpt_data['p3_mode'] = p3_mode
                     torch.save(global_ckpt_data, global_ckpt_path)
                     logger.info(f"*** New GLOBAL best model saved (Dice: {global_best_dice:.4f}) ***")
             else:
@@ -652,6 +756,16 @@ if __name__ == '__main__':
     parser.add_argument('--two-stage', action='store_true', help='Enable legacy 2-stage ladder training (default is single-stage)')
     parser.add_argument('--locked-base', type=str, default=None, help='Path to locked base checkpoint to ingest via load_locked_base_into_p3')
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint file to resume or initialize from')
+    parser.add_argument('--data-root', type=str, default=None, help='Override dataset root_dir')
+    parser.add_argument('--depth', type=int, default=None, help='Override num_transformer_layers (ViT depth)')
+    parser.add_argument('--batch-size', type=int, default=None, help='Override training batch_size')
+    parser.add_argument('--num-workers', type=int, default=None, help='Override DataLoader num_workers')
+    parser.add_argument('--lr', type=float, default=None, help='Override base learning rate')
+    parser.add_argument('--p3-lr', type=float, default=None, help='Override P3 refinement learning rate')
+    parser.add_argument('--gamma-init', type=float, default=None, help='Override initial gamma value for P3 refinement')
+    parser.add_argument('--epochs', type=int, default=None, help='Override total training epochs')
+    parser.add_argument('--warmup-epochs', type=int, default=None, help='Override scheduler warmup epochs')
+    parser.add_argument('--output-dir', type=str, default=None, help='Override output directory')
     args = parser.parse_args()
     main(args)
 
