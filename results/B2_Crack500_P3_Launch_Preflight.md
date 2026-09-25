@@ -428,3 +428,97 @@ Bằng chứng thực nghiệm xuyên suốt 40 batches cho thấy:
 * **$BS=12$ là "Điểm Ngọt" Hoàn Hảo Nhất (Optimal Sweet Spot):** Đạt throughput cao (0.69 samples/s), thời gian mỗi epoch chỉ khoảng 45 phút, trong khi vẫn duy trì **vùng đệm an toàn 4.47 GB** để loại bỏ 100% rủi ro OOM do phân mảnh bộ nhớ khi huấn luyện dài hạn 20–30 epochs trên Crack500.
 * **$BS=14$ là Lựa chọn Ép Tải Tối Đa Khả Dụng (Maximum Practical Stretch):** Nếu muốn rút ngắn thêm ~7% thời gian huấn luyện mà vẫn giữ được > 3.0 GB buffer an toàn.
 * **Tuyệt đối KHÔNG sử dụng $BS \ge 16$ cho quá trình huấn luyện chính thức:** Không mang lại thêm lợi ích throughput đáng kể nhưng lại đánh đổi toàn bộ sự an toàn của buổi huấn luyện.
+
+---
+
+## 10. Đánh Giá Chuyên Sâu Sau Chuỗi 20 Batches & Phân Tích So Kèo BS14 vs BS16 (In-Depth Critique & Candidate Shortlist)
+
+Với dữ liệu đo đạc hoàn chỉnh **20 batches cho cả BS12, BS14, BS16 và BS18**, khi lọc bỏ 5 batch đầu để triệt tiêu ảnh hưởng warm-up và khảo sát **Batch 6 $\to$ 20**, bức tranh vận hành thực tế bộc lộ một kết quả rất bất ngờ:
+
+> **BS18 không còn là ứng viên về tốc độ. BS14 và BS16 đang cho thời gian/epoch gần như tương đương nhau, trong khi BS18 lại thụt lùi do step time tăng quá mạnh.**
+
+---
+
+### 10.1. Phân Tích Thời Gian Thực Thi Stage 1 / Epoch (Mean Batch 6 $\to$ 20)
+Tập dữ liệu Crack500 có 1,896 mẫu huấn luyện, số lượng batch/epoch tương ứng là:
+* BS12: 158 batches/epoch
+* BS14: 136 batches/epoch
+* BS16: 119 batches/epoch
+* BS18: 106 batches/epoch
+
+| Batch Size | Mean Step B6 $\to$ 20 | Ước tính Stage 1 / Epoch | Approx Samples/s | Đánh giá Vận hành |
+|:---:|:---:|:---:|:---:|:---|
+| **BS = 12** | 7.52 s | **19.8 phút** | 1.60 | Baseline an toàn |
+| **BS = 14** | 8.58 s | **19.4 phút** | 1.63 | Rất nhanh, cân bằng |
+| **BS = 16** | 9.47 s | **18.8 phút** | **1.69** | **Stage 1 nhanh nhất trong 4 mức** |
+| **BS = 18** | 11.46 s | **20.2 phút** | 1.57 | **Thụt lùi (Step time tăng quá mạnh)** |
+
+* **Hiện tượng quan sát được:**
+  - **BS16 cho thời gian Stage 1 nhanh nhất**, dù mỗi batch xử lý lâu hơn nhưng hưởng lợi từ việc giảm số lượng batch (chỉ còn 119 batches).
+  - **BS18 có batch lớn hơn, nhưng step time tăng vọt lên 11.46s**, khiến lợi thế 106 batch/epoch không còn bù đắp nổi chi phí tính toán.
+
+---
+
+### 10.2. Phân Tích Thời Gian Thực Thi Stage 2 / Epoch (Mean Batch 6 $\to$ 20)
+
+| Batch Size | Mean Step B6 $\to$ 20 | Ước tính Stage 2 / Epoch |
+|:---:|:---:|:---:|
+| **BS = 12** | 4.15 s | **10.9 phút** |
+| **BS = 14** | 3.17 s | **7.2 phút** |
+| **BS = 16** | 3.94 s | **7.8 phút** |
+| **BS = 18** | 4.67 s | **8.2 phút** |
+
+*(Lưu ý: Ở Stage 2, BS14 có số liệu thấp nhất, tuy nhiên dữ liệu đo vẫn chịu jitter dao động mạnh nên chênh lệch vài chục giây chưa thể coi là bằng chứng tuyệt đối).*
+
+---
+
+### 10.3. Dự Phóng Tổng Thời Gian Huấn Luyện (Split Chuẩn: 8 Epochs Stage 1 + 12 Epochs Stage 2)
+
+| Batch Size | 8 $\times$ Stage 1 + 12 $\times$ Stage 2 | Tổng Thời Gian Wall-Clock |
+|:---:|:---:|:---:|
+| **BS = 12** | ~289 phút | ~4.82 giờ |
+| **BS = 14** | ~242 phút | **~4.03 giờ** |
+| **BS = 16** | ~244 phút | **~4.07 giờ** |
+| **BS = 18** | ~261 phút | ~4.35 giờ |
+
+> [!NOTE]
+> **BS14 và BS16 gần như ngang ngửa nhau về wall-clock dự phóng (~4.0 giờ).**  
+> Đây là lý do khoa học xác đáng vì sao không thể chỉ đưa ra quyết định dựa trên chỉ số `samples/sec` thô.
+
+---
+
+### 10.4. Cán Cân VRAM Thực Tế (Run C ASDW)
+
+| Batch Size | Peak Allocated VRAM | Peak Reserved VRAM | VRAM Tự do (Headroom) | Đánh giá Rủi ro |
+|:---:|:---:|:---:|:---:|:---|
+| **BS = 12** | 9.02 GB | 10.33 GB | **~4.23 GB** | Rất thoải mái, zero risk |
+| **BS = 14** | 10.33 GB | 11.70 GB | **~2.86 GB** | Margin an toàn đáng kể |
+| **BS = 16** | 11.73 GB | 13.21 GB | **~1.35 GB** | Margin vừa đủ, cần kiểm soát |
+| **BS = 18** | **13.11 GB** | **14.58 GB** | **~0.00 – 0.20 GB** | **Ăn cạn ngân sách bộ nhớ (14.56 GB)** |
+
+* **Đánh đổi cụ thể:** BS18 chỉ thêm 2 samples/batch nhưng phải trả giá thêm tới **~1.37 GB Reserved** so với BS16, đẩy hệ thống vào nguy cơ OOM trực tiếp.
+
+---
+
+### 10.5. Tổng Kết 4 Hồ Sơ Vận Hành (Operational Profiles)
+
+1. **BS12:** Bộ nhớ cực kỳ dư dả, an toàn tuyệt đối, nhưng thời gian hoàn thành 20 epochs lâu hơn (~4.8h).
+2. **BS14:** Thời gian/epoch rất tốt (~4.0h), bộ nhớ vẫn giữ được vùng đệm an toàn đáng kể (~2.86 GB).
+3. **BS16:** Stage 1 nhanh nhất trong phép đo hiện tại, tổng thời gian xấp xỉ ngang BS14 (~4.0h), còn lại ~1.35 GB reserved headroom.
+4. **BS18:** Không bị OOM trong kịch bản ngắn, nhưng vùng đệm quá mỏng manh (~0.2 GB) và throughput/epoch không còn ưu thế.
+
+---
+
+### 10.6. Hiệu Chỉnh Phương Pháp Luận & Bước Hành Động Kế Tiếp
+
+1. **Thận Trọng Về Mặt Phương Pháp Luận:**
+   - Không vội tuyên bố BS16 là “tối ưu tuyệt đối” chỉ dựa vào chỉ số `mean B6→20` hiện tại.
+   - Lý do: Bước đo hiện tại vẫn chịu ảnh hưởng dao động (jitter) lớn từ môi trường chia sẻ Colab (CPU scheduling, DataLoader workers, biến thiên độ dài vết nứt ảnh).
+2. **Kết Luận Chắc Chắn:**
+   - **Loại bỏ BS18:** Không có lợi thế về thời gian epoch và biên bộ nhớ quá nguy hiểm.
+   - **Khoanh vùng 2 ứng viên chung kết:** **BS14 vs BS16**.
+   - **Bài toán Trade-off cốt lõi:** BS16 mua được khoảng **~0.6 phút/epoch Stage 1** bằng cách tiêu tốn thêm khoảng **~1.51 GB Reserved VRAM**.
+3. **Hành Động Tiếp Theo:**
+   - Chưa vội khóa batch size cho training pipeline chính thức.
+   - Sửa script benchmark để đo **GPU-side throughput thuần khiết** bằng `torch.cuda.Event` (tách biệt hoàn toàn thời gian DataLoader prefetch và warm-up).
+   - So tài trực tiếp (Head-to-Head) giữa **BS14 vs BS16** để có số liệu vững chắc 100% trước khi bấm máy huấn luyện chính thức.
