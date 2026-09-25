@@ -219,3 +219,55 @@ Sau khi đồ thị và bộ nhớ đã ổn định, thời gian thực thi m�
 3. **Độ an toàn phần cứng trên Tesla T4:**
    - Mức VRAM Reserved cao nhất trong toàn bộ các run chỉ là **9.76 GB**, còn lại hơn **4.8 GB bộ nhớ đệm an toàn** trên Tesla T4 (14.56 GB).
    - Nguy cơ OOM trong quá trình huấn luyện dài hạn 20–30 epochs ở Batch Size 12 là **gần như bằng 0**.
+
+---
+
+## 6. Khảo Sát Giới Hạn Biên Bộ Nhớ: Thử Nghiệm Ép Tải Batch Size 14 (BS14 Stress Test - D12)
+
+*Thời gian thực thi: 2026-09-25*  
+*Môi trường: Google Colab Tesla T4 (14.56 GB VRAM khả dụng), 2 vCPUs*  
+*Mục đích:* Xác định chính xác trần bộ nhớ vật lý nằm giữa $BS=12$ (an toàn) và $BS=16$ (OOM). Khảo sát khả năng chịu tải của kiến trúc Depth 12 tại $BS=14$ trên cả 3 mode P3 (Run A, B, C) chạy trong các tiến trình độc lập (`num_batches = 6`, `num_workers = 2`).
+
+### 6.1. Bảng So Sánh Đối Chiếu Giữa BS12 và BS14 (Depth 12 trên T4)
+
+| Chế độ P3 / Thông số đo | BS12 (8 batches) | BS14 (6 batches) | Chênh lệch tài nguyên (BS12 $\to$ BS14) | Trạng thái Nghiệm thu |
+|:---|:---:|:---:|:---:|:---:|
+| **Run A (Identity)** | | | | |
+| - Peak Allocated VRAM | 8,262.4 MB (8.07 GB) | **9,672.9 MB (9.45 GB)** | +1,410.5 MB (+17.1%) | **PASS (100% Invariants)** |
+| - Peak Reserved VRAM | 9,766.0 MB (9.54 GB) | **11,128.0 MB (10.87 GB)** | +1,362.0 MB (+14.0%) | VRAM tự do còn 3.69 GB |
+| - Stage 1 Throughput | 0.44 samples/s | 0.36 samples/s | Chậm hơn do tỷ trọng cold-start (6 batches) | Measured |
+| **Run B (Generic DW)** | | | | |
+| - Peak Allocated VRAM | 8,313.1 MB (8.12 GB) | **9,970.6 MB (9.74 GB)** | +1,657.5 MB (+19.9%) | **PASS (100% Invariants)** |
+| - Peak Reserved VRAM | 8,446.0 MB (8.25 GB) | **10,276.0 MB (10.04 GB)** | +1,830.0 MB (+21.7%) | VRAM tự do còn 4.52 GB |
+| - Stage 1 Throughput | 0.41 samples/s | 0.35 samples/s | -14.6% | Measured |
+| **Run C (ASDW)** | | | | |
+| - Peak Allocated VRAM | 8,461.9 MB (8.26 GB) | **10,100.1 MB (9.86 GB)** | +1,638.2 MB (+19.4%) | **PASS (100% Invariants)** |
+| - Peak Reserved VRAM | 9,200.0 MB (8.98 GB) | **10,798.0 MB (10.54 GB)** | +1,598.0 MB (+17.4%) | VRAM tự do còn 4.02 GB |
+| - Stage 1 Throughput | 0.37 samples/s | 0.31 samples/s | -16.2% | Measured |
+
+---
+
+### 6.2. Các Phát Hiện Kỹ Thuật Quan Trọng Từ BS14
+
+1. **BS14 Vẫn Khả Thi Về Mặt Kỹ Thuật (Technically Feasible):**
+   - Không có bất kỳ hiện tượng OOM, CUDA illegal access, hay NaN/Inf nào phát sinh ở $BS=14$ trên cả 3 mode.
+   - Cả 24 invariant checks đều đạt **PASS 100%**, bao gồm kiểm tra tính bất biến của PE28 buffer, chuyển giao Stage 1 $\to$ 2, và phân luồng optimizer Stage 2.
+2. **Biên Dự Phòng Bộ Nhớ Thu Hẹp (Shrinking VRAM Buffer):**
+   - Ở $BS=12$, VRAM Reserved cao nhất là 9.77 GB (buffer an toàn ~4.8 GB).
+   - Ở $BS=14$, VRAM Reserved chạm ngưỡng **10.87 GB** (Run A) và **10.54 GB** (Run C). Mặc dù GPU Tesla T4 còn ~3.7 GB – 4.0 GB trống, áp lực bộ nhớ (memory pressure) đã tăng lên rõ rệt.
+3. **Quy Luật Tốc Độ Vẫn Nhất Quán Tuyệt Đối:**
+   - Tại $BS=14$, thứ tự throughput giữa các mode vẫn tuân thủ chính xác quy luật độ phức tạp tính toán:
+     $$\text{Run A (0.36 samples/s)} > \text{Run B (0.35 samples/s)} > \text{Run C (0.31 samples/s)}$$
+   - Chi phí tính toán của ASDW so với Identity ở BS14 là:
+     $$\frac{0.36 - 0.31}{0.36} \approx 13.9\% \text{ overhead}$$
+     (Hoàn toàn tương đồng với mức chênh lệch 15.9% đã đo được ở BS12).
+
+---
+
+### 6.3. Khuyến Nghị Cuối Cùng Cho Cấu Hình Huấn Luyện (Training Configuration Decision)
+
+* Mặc dù **$BS=14$ chạy thành công**, việc duy trì huấn luyện dài hạn (20–30 epochs liên tục qua nhiều giờ) tại $BS=14$ tiềm ẩn rủi ro phân mảnh bộ nhớ (CUDA allocator fragmentation) khi chuyển giao giữa các epoch hoặc khi tính validation metric trên toàn bộ 348 ảnh.
+* Do đó, **khuyến nghị giữ nguyên $BS=12$ làm cấu hình chuẩn mực vàng (Gold Standard)**:
+  - VRAM Reserved luôn $< 9.8$ GB (buffer tự do $\ge 4.8$ GB).
+  - Throughput ở steady-state cao hơn và phân bổ đều đặn.
+  - Loại bỏ 100% rủi ro gián đoạn buổi huấn luyện do OOM đột xuất.
