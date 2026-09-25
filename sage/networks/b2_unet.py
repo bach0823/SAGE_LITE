@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     from .convnextv2_vit_hybrid import ConvNeXtV2ViTHybrid
@@ -78,11 +79,13 @@ class B2ConvNeXtViTUNet(nn.Module):
         use_dwsc: bool = False,
         pretrained: bool = True,
         sage_config: Optional[Dict[str, Any]] = None,
+        p3_mode: Optional[str] = None,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
         self.num_transformer_layers = num_transformer_layers
+        self.p3_mode = p3_mode
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -107,7 +110,22 @@ class B2ConvNeXtViTUNet(nn.Module):
             use_dwsc=use_dwsc,
         )
 
-        # 4. Inject SAGE wrappers in-place and construct shared expert pool
+        # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
+        if p3_mode in ("A", "B", "C"):
+            orig_grid = 14
+            pos_4d = (
+                self.backbone.positional_embeddings.detach()
+                .reshape(1, orig_grid, orig_grid, -1)
+                .permute(0, 3, 1, 2)
+            )
+            pos28_4d = F.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
+            pe28_tensor = pos28_4d.permute(0, 2, 3, 1).flatten(1, 2).detach().float()
+            self.backbone.register_buffer("pe28_fixed", pe28_tensor, persistent=True)
+            pe_owner = self.backbone
+        else:
+            pe_owner = None
+
+        # 5. Inject SAGE wrappers in-place and construct shared expert pool
         self.expert_pool = inject_sage_layers(
             convnext=self.backbone.convnext,
             transformer_blocks=self.backbone.transformer_blocks,
@@ -115,6 +133,8 @@ class B2ConvNeXtViTUNet(nn.Module):
             stem_channels=self.backbone.stem_channels,
             transformer_dim=self.backbone.transformer_dim,
             sage_config=self.sage_config,
+            p3_mode=p3_mode,
+            pe_owner=pe_owner,
         )
 
         # 5. Pre-populate all SA-Hub adapters eagerly (O(D^2) pairwise)
@@ -296,6 +316,7 @@ def create_b2_unet(
     use_dwsc: bool = False,
     pretrained: bool = True,
     sage_config: Optional[Dict[str, Any]] = None,
+    p3_mode: Optional[str] = None,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -309,4 +330,5 @@ def create_b2_unet(
         use_dwsc=use_dwsc,
         pretrained=pretrained,
         sage_config=sage_config,
+        p3_mode=p3_mode,
     )

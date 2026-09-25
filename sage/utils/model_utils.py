@@ -9,6 +9,7 @@ import logging
 from typing import List, Dict, Optional
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def count_parameters(model, trainable_only=True):
@@ -379,3 +380,94 @@ def save_model_config(model, config_path):
         json.dump(info, f, indent=4)
     
     logging.info(f"Model config saved to {config_path}")
+
+
+P3_EXPECTED_KEYS = {
+    "A": {"backbone.pe28_fixed"},
+    "B": {
+        "backbone.pe28_fixed",
+        "backbone.convnext.stages.0.p3_refinement.dw_1.weight",
+        "backbone.convnext.stages.0.p3_refinement.dw_2.weight",
+        "backbone.convnext.stages.0.p3_refinement.dw_3.weight",
+        "backbone.convnext.stages.0.p3_refinement.pw.weight",
+        "backbone.convnext.stages.0.p3_refinement.gamma",
+        "backbone.convnext.stages.1.p3_refinement.dw_1.weight",
+        "backbone.convnext.stages.1.p3_refinement.dw_2.weight",
+        "backbone.convnext.stages.1.p3_refinement.dw_3.weight",
+        "backbone.convnext.stages.1.p3_refinement.pw.weight",
+        "backbone.convnext.stages.1.p3_refinement.gamma",
+    },
+    "C": {
+        "backbone.pe28_fixed",
+        "backbone.convnext.stages.0.p3_refinement.dw_h.weight",
+        "backbone.convnext.stages.0.p3_refinement.dw_v.weight",
+        "backbone.convnext.stages.0.p3_refinement.dw_l.weight",
+        "backbone.convnext.stages.0.p3_refinement.pw.weight",
+        "backbone.convnext.stages.0.p3_refinement.gamma",
+        "backbone.convnext.stages.1.p3_refinement.dw_h.weight",
+        "backbone.convnext.stages.1.p3_refinement.dw_v.weight",
+        "backbone.convnext.stages.1.p3_refinement.dw_l.weight",
+        "backbone.convnext.stages.1.p3_refinement.pw.weight",
+        "backbone.convnext.stages.1.p3_refinement.gamma",
+    },
+}
+
+
+def load_locked_base_into_p3(model, checkpoint_or_path, p3_mode: str):
+    """
+    Strict whitelist checkpoint loader for P3.
+    Enforces exact equality of base keys, 0 unexpected keys,
+    and missing keys must match P3_EXPECTED_KEYS[p3_mode] exactly.
+    """
+    if isinstance(checkpoint_or_path, str):
+        if not os.path.exists(checkpoint_or_path):
+            raise FileNotFoundError(f"Checkpoint not found at {checkpoint_or_path}")
+        checkpoint = torch.load(checkpoint_or_path, map_location="cpu")
+    else:
+        checkpoint = checkpoint_or_path
+
+    if isinstance(checkpoint, dict):
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+
+    if len(incompatible.unexpected_keys) > 0:
+        raise RuntimeError(
+            f"[P3 Checkpoint Ingestion Error] Unexpected keys detected: {incompatible.unexpected_keys}"
+        )
+
+    expected_missing = P3_EXPECTED_KEYS.get(p3_mode, set())
+    actual_missing = set(incompatible.missing_keys)
+
+    if actual_missing != expected_missing:
+        surplus = actual_missing - expected_missing
+        deficit = expected_missing - actual_missing
+        raise RuntimeError(
+            f"[P3 Checkpoint Ingestion Error] Strict missing-keys mismatch for Run {p3_mode}!\n"
+            f"  Unexpectedly missing (surplus): {surplus}\n"
+            f"  Expected but present (deficit): {deficit}"
+        )
+
+    # Synchronize pe28_fixed from the newly loaded base positional_embeddings
+    if hasattr(model.backbone, "pe28_fixed") and hasattr(model.backbone, "positional_embeddings"):
+        pos_4d = (
+            model.backbone.positional_embeddings.detach()
+            .reshape(1, 14, 14, -1)
+            .permute(0, 3, 1, 2)
+        )
+        pos28_4d = F.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
+        pe28_tensor = pos28_4d.permute(0, 2, 3, 1).flatten(1, 2).detach().float()
+        model.backbone.pe28_fixed.copy_(pe28_tensor)
+
+    logging.info(
+        f"[OK] Checkpoint successfully ingested for Run {p3_mode} with strict whitelist: "
+        f"0 unexpected keys, {len(actual_missing)} authorized missing keys."
+    )
+    return incompatible

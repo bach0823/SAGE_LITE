@@ -1,0 +1,52 @@
+# ==============================================================================
+# SAGE-Lite B2 Proposal 3 (P3) Ablation Study — Run B Configuration
+# ==============================================================================
+# Role: Run B — Generic Refinement (Near-Matched-Capacity Control)
+# Architecture: 3x DWConv(3x3) -> Concat(3C) -> GELU -> PWConv(3C->C) -> Residual(gamma) -> AdaptiveAvgPool2d(28, 28) -> ViT
+# Refinement Params: 38,450 total (S0: 8,209, S1: 30,241)
+# Backbone Buffer: backbone.pe28_fixed (shape [1, 784, 192], float32)
+# Locked Base Invariant: Depth = 4, Seed = 42, Batch Size = 12, Epochs = 30
+# ==============================================================================
+
+model: B2
+num_transformer_layers: 4
+p3_mode: "B"
+seed: 42
+img_size: 448
+batch_size: 12
+num_workers: 4
+epochs: 30
+patience: 6
+two_stage: true
+lr: 1e-4
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
+output_dir: "/content/drive/MyDrive/crack_seg/B2_P3_RunB_Depth4"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+sage_config:
+  top_k: 4
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+  fusion_type: "residual"
+  residual_scale: 0.1
+
+root_dir: "/content/dataset/Crack500"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"

@@ -4,6 +4,7 @@ import torch.nn as nn
 from sage.components.sage_layer import SageLayer, create_sage_layer
 from sage.components.router import create_sage_router
 from sage.components.sa_hub import SAHub
+from sage.components.p3_refinement import ASDWRefinement, GenericRefinement
 
 from .wrappers import TupleSafeWrapper
 
@@ -17,6 +18,8 @@ def inject_sage_layers(
     stem_channels,
     transformer_dim,
     sage_config,
+    p3_mode=None,
+    pe_owner=None,
 ):
     """
     Inject SAGE wrappers into ConvNeXt stages and Transformer blocks in-place.
@@ -57,13 +60,29 @@ def inject_sage_layers(
             config=router_config,
         )
 
+        p3_mod = None
+        if p3_mode in ("A", "B", "C") and stage_idx in (0, 1):
+            ch = 48 if stage_idx == 0 else 96
+            if p3_mode == "C":
+                p3_mod = ASDWRefinement(channels=ch)
+            elif p3_mode == "B":
+                p3_mod = GenericRefinement(channels=ch)
+            elif p3_mode == "A":
+                p3_mod = nn.Identity()
+
         sage_wrapper = create_sage_layer(
             main_block=TupleSafeWrapper(original_stage),
             router=router,
             sa_hub=sa_hub,
             config=sage_layer_config,
             my_index=stage_idx,
+            layer_type="cnn",
+            stage_idx=stage_idx,
+            p3_refinement=p3_mod,
         )
+
+        if pe_owner is not None and stage_idx in (0, 1):
+            sage_wrapper.set_pe_owner(pe_owner)
 
         convnext.stages[stage_idx] = sage_wrapper
 
@@ -84,6 +103,9 @@ def inject_sage_layers(
             sa_hub=sa_hub,
             config=sage_layer_config,
             my_index=len(convnext.stages) + layer_idx,
+            layer_type="transformer",
+            stage_idx=layer_idx,
+            p3_refinement=None,
         )
 
         transformer_blocks[layer_idx] = sage_wrapper
@@ -91,12 +113,20 @@ def inject_sage_layers(
     logger.info("\nStep 2: Building expert pool from wrapped .main_block attributes...")
     expert_pool = nn.ModuleList()
 
-    for stage_wrapper in convnext.stages:
-        expert_pool.append(stage_wrapper.main_block)
+    for stage_idx, stage_wrapper in enumerate(convnext.stages):
+        expert_mod = stage_wrapper.main_block
+        expert_mod.expert_type = "cnn"
+        expert_mod.expert_name = f"convnext_stage_{stage_idx}"
+        expert_mod.expert_index = stage_idx
+        expert_pool.append(expert_mod)
     logger.info("  - Added %s CNN main_blocks to pool.", len(convnext.stages))
 
-    for block_wrapper in transformer_blocks:
-        expert_pool.append(block_wrapper.main_block)
+    for block_idx, block_wrapper in enumerate(transformer_blocks):
+        expert_mod = block_wrapper.main_block
+        expert_mod.expert_type = "transformer"
+        expert_mod.expert_name = f"transformer_block_{block_idx}"
+        expert_mod.expert_index = len(convnext.stages) + block_idx
+        expert_pool.append(expert_mod)
     logger.info("  - Added %s Transformer main_blocks to pool.", len(transformer_blocks))
 
     # Link expert_pool into all SageLayer wrappers for forward pass

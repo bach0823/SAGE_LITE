@@ -50,6 +50,9 @@ class SageLayer(nn.Module):
         residual_scale: float = 0.1,
         fusion_type: str = "residual",
         adaptive_alpha: float = 0.9,
+        layer_type: Optional[str] = None,
+        stage_idx: Optional[int] = None,
+        p3_refinement: Optional[nn.Module] = None,
     ):
         """
         Initialize SAGE Layer for SAGE-Lite.
@@ -89,9 +92,23 @@ class SageLayer(nn.Module):
         # Cached outputs from the most recent forward pass (Tensor Contract)
         self._last_lb_loss: Optional[torch.Tensor] = None
         self._last_routing_info: Optional[Dict[str, Any]] = None
+        self.layer_type = layer_type
+        self.stage_idx = stage_idx
+        self.p3_refinement = p3_refinement
+        object.__setattr__(self, "_pe_owner", None)
 
         self.logger = logging.getLogger(self.__class__.__name__)
-        
+
+    def set_pe_owner(self, owner: nn.Module) -> None:
+        """Set canonical PE28 owner without registering as child module in _modules."""
+        object.__setattr__(self, "_pe_owner", owner)
+
+    def get_pe28(self) -> Optional[torch.Tensor]:
+        """Dynamically retrieve current device-local PE28 buffer from canonical owner."""
+        if hasattr(self, "_pe_owner") and self._pe_owner is not None:
+            return getattr(self._pe_owner, "pe28_fixed", None)
+        return None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -236,7 +253,36 @@ class SageLayer(nn.Module):
                 # Zero-cost Self-Selection Bypass
                 if self.my_index is not None and expert_idx == self.my_index:
                     adapted_expert_output = main_output[original_batch_indices]
+                elif (
+                    getattr(self, "layer_type", None) == "cnn"
+                    and getattr(self, "stage_idx", None) in (0, 1)
+                    and getattr(expert, "expert_type", None) == "transformer"
+                ):
+                    # Step 4a (P3): High-Resolution CNN (S0/S1) -> ViT Expert
+                    # S0 feature is x (C=48, 112x112); S1 feature is main_output (C=96, 56x56)
+                    feat_sub = main_output[original_batch_indices] if getattr(self, "stage_idx", None) == 1 else x[original_batch_indices]
+                    x_refined = self.p3_refinement(feat_sub) if self.p3_refinement is not None else feat_sub
+                    x_compressed = F.adaptive_avg_pool2d(x_refined, (28, 28))
+                    x_tokens = x_compressed.flatten(2).transpose(1, 2).contiguous()
+                    adapted_input = self.sa_hub._adapt_channels(x_tokens, 192)
+
+                    # Fixed Shared PE28 via Runtime Lookup
+                    pe28 = self.get_pe28()
+                    assert pe28 is not None, f"SageLayer (idx={self.my_index}) missing pe_owner link!"
+                    tokens_with_pe = adapted_input + pe28.to(device=adapted_input.device, dtype=adapted_input.dtype)
+
+                    expert_raw_output = expert(tokens_with_pe)
+                    if isinstance(expert_raw_output, tuple):
+                        expert_raw_output = expert_raw_output[0]
+
+                    main_path_shape_subset = main_output[original_batch_indices].shape
+                    adapted_expert_output, _ = self.sa_hub.adapt(
+                        expert_raw_output,
+                        self.main_block,
+                        main_path_shape=main_path_shape_subset
+                    )
                 else:
+                    # Normal SAGE Path
                     # Step 4a: Adapt input tensor shape for this expert
                     adapted_input, _ = self.sa_hub.adapt(
                         x[original_batch_indices],
@@ -311,6 +357,9 @@ def create_sage_layer(
     config: Optional[Dict[str, Any]] = None,
     my_index: Optional[int] = None,
     expert_pool: Optional[nn.ModuleList] = None,
+    layer_type: Optional[str] = None,
+    stage_idx: Optional[int] = None,
+    p3_refinement: Optional[nn.Module] = None,
 ) -> SageLayer:
     """
     Factory function to create a SAGE layer with configuration.
@@ -343,5 +392,8 @@ def create_sage_layer(
         residual_scale=config.get('residual_scale', 0.1),
         fusion_type=config.get('fusion_type', 'residual'),
         adaptive_alpha=config.get('adaptive_alpha', 0.9),
+        layer_type=layer_type,
+        stage_idx=stage_idx,
+        p3_refinement=p3_refinement,
     )
 
