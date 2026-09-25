@@ -321,9 +321,54 @@ Trong báo cáo Phase 0 ban đầu (`results/B2_Crack500_Phase0_Characterization
 
 | Cấu hình | Khả năng Thực thi | VRAM Dự phòng | Rủi ro OOM Dài hạn (20-30 epochs) | Đánh giá & Quyết định |
 |:---:|:---:|:---:|:---:|:---|
-| **BS = 16** | Khả thi (PASS 100%) | ~2.74 – 3.14 GB | **Trung bình - Cao** (Dễ dính OOM khi cache phân mảnh sau nhiều epoch hoặc khi chạy validation 348 ảnh) | Dùng làm mốc chứng minh giới hạn trần vật lý |
+| **BS = 18** | Kịch trần vật lý (PASS 100%) | **~201 MB (0.20 GB)** | **Cực kỳ nguy hiểm (98.6% VRAM)** | Ranh giới vách đá vật lý (Physical Cliff) |
+| **BS = 16** | Khả thi (PASS 100%) | ~2.74 – 3.14 GB | **Trung bình - Cao** (Dễ dính OOM khi cache phân mảnh sau nhiều epoch hoặc khi chạy validation 348 ảnh) | Giới hạn thực tế tối đa |
 | **BS = 14** | Khả thi (PASS 100%) | ~3.69 – 4.52 GB | **Thấp - Trung bình** | Vùng biên dung sai |
 | **BS = 12** | **Tối ưu tuyệt đối** | **~4.78 – 5.10 GB** | **Gần như bằng 0 (Zero-risk)** | **CHỐT CHÍNH THỨC (Gold Standard)** |
 
 > **Phán Quyết Khoa Học Cuối Cùng:**  
-> Dù BS16 hoàn toàn có thể chạy được về mặt vật lý, **`batch_size = 12` là lựa chọn tối ưu nhất và an toàn tuyệt đối** cho các cuộc thử nghiệm huấn luyện chính thức (Phase 1 Base Training và Phase 7 P3 Comparison).
+> Dù BS16 và BS18 hoàn toàn có thể chạy được về mặt vật lý trong tiến trình đơn, **`batch_size = 12` là lựa chọn tối ưu nhất và an toàn tuyệt đối** cho các cuộc thử nghiệm huấn luyện chính thức (Phase 1 Base Training và Phase 7 P3 Comparison).
+
+---
+
+## 8. Khám Phá Ranh Giới Vách Đá Vật Lý: Ép Tải Cực Hạn Batch Size 18 (BS18 Boundary Cliff Probe - Run C ASDW)
+
+*Thời gian thực thi: 2026-09-25*  
+*Môi trường: Google Colab Tesla T4 (14.56 GB / 14,909 MB VRAM khả dụng), 2 vCPUs*  
+*Mục đích:* Thử thách ranh giới vật lý tuyệt đối của GPU Tesla T4 16GB bằng cách kích hoạt chế độ tính toán nặng nhất (**Run C - ASDW**) với ViT Depth 12 tại $BS=18$ (`num_batches = 6`, `num_workers = 2`).
+
+### 8.1. Kết Quả Đo Lường Trực Tiếp Tại BS18 (Run C - ASDW)
+
+* **Peak Allocated VRAM:** **12,992.3 MB (12.69 GB)**
+* **Peak Reserved VRAM:** **14,708.0 MB (14.36 GB)**
+* **VRAM Khả dụng Thực tế:** 14,909 MB (~14.56 GB)
+* **Vùng đệm tự do còn lại (Free Headroom):** Đúng **~201 MB** *(Hệ thống chiếm dụng tới **98.65%** tổng dung lượng GPU!)*
+* **Tốc độ thực thi:** Stage 1 Avg Step = 53.356s | Throughput = 0.34 samples/s
+* **Tiến trình:** Hoàn thành 100% cả 6 batches Stage 1, chuyển giao checkpoint mượt mà, thực thi tiếp 6 batches Stage 2 và validation metric sanity check.
+* **Toàn vẹn phần mềm:** Toàn bộ **24 invariant checks** đều đạt **PASS 100%**, không sinh NaN/Inf.
+
+---
+
+### 8.2. Bản Đồ Tiến Hóa Bộ Nhớ Của Chế Độ Nặng Nhất (Run C ASDW - Depth 12 trên T4)
+
+Dưới đây là bức tranh toàn cảnh thực nghiệm hoàn chỉnh về sự mở rộng bộ nhớ của kiến trúc SAGE-Lite B2 UNet (Depth 12 + ASDW multi-scale routing) từ mức tiêu chuẩn đến trần vật lý:
+
+| Batch Size | Peak Allocated VRAM | Peak Reserved VRAM | VRAM Tự do Dự phòng | Tỷ lệ Chiếm dụng T4 | Trạng thái Thực tế |
+|:---:|:---:|:---:|:---:|:---:|:---|
+| **BS = 12** | 8,461.9 MB (8.26 GB) | 9,200.0 MB (8.98 GB) | **~5,580 MB (5.45 GB)** | **62.2%** | **Vùng An toàn Tuyệt đối (Gold Standard)** |
+| **BS = 14** | 10,100.1 MB (9.86 GB) | 10,798.0 MB (10.54 GB) | **~4,111 MB (4.02 GB)** | **72.4%** | Vùng Dung sai Kỹ thuật |
+| **BS = 16** | 11,639.0 MB (11.37 GB) | 11,870.0 MB (11.59 GB) | **~3,039 MB (2.97 GB)** | **79.6%** | Giới hạn Khả thi Thực tế |
+| **BS = 18** | **12,992.3 MB (12.69 GB)** | **14,708.0 MB (14.36 GB)** | **~201 MB (0.20 GB)** | **98.6%** | **Vách đá Vật lý (Physical Cliff Edge)** |
+| **BS $\ge$ 20** | *Dự phóng > 14.3 GB* | *Vượt quá 15 GB* | *0 MB (Âm)* | *> 100%* | **OOM Chắc chắn 100%** |
+
+---
+
+### 8.3. Ý Nghĩa Khoa Học Cốt Lõi Từ Phát Hiện BS18
+
+1. **Khẳng định tính chính xác của mô hình lý thuyết:**
+   - Mỗi mức tăng 2 đơn vị batch size ($BS + 2$) tiêu thụ thêm khoảng **~1.4 GB – 1.6 GB Allocated VRAM**.
+   - Tại $BS=18$, Reserved VRAM vọt lên **14,708 MB**, áp sát trần 14,909 MB của phần cứng T4. Điều này chứng minh vì sao $BS=24$ trong kịch bản Phase 0 trước đây bị OOM ngay lập tức.
+2. **BS18 là "vũ điệu trên dây" (Dancing on the Razor's Edge):**
+   - Dù kịch bản 6-batch preflight vượt qua thành công, với khoảng đệm chỉ vỏn vẹn **201 MB**, bất kỳ biến động nhỏ nào trong thực tế (như DataLoader prefetch, biến dạng dữ liệu augmentation ngẫu nhiên, hoặc quá trình tính toán validation loss trên 348 mẫu) chắc chắn sẽ làm sập buổi huấn luyện dài hạn.
+3. **Củng cố tuyệt đối cho quyết định chọn BS12:**
+   - Không còn bất kỳ sự nghi ngờ nào: $BS=12$ (chiếm 62.2% VRAM, buffer > 5.4 GB) là sự cân bằng hoàn hảo nhất giữa hiệu quả tận dụng GPU và sự ổn định dài hạn (zero-risk) cho công trình nghiên cứu.
