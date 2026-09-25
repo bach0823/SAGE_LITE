@@ -272,23 +272,22 @@ def main(args):
     locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
     generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
 
+    if p3_mode is not None and locked_base_path and generic_ckpt_path:
+        raise ValueError(
+            "For P3 runs (p3_mode is not None), both --locked-base (locked_base_checkpoint) and "
+            "--checkpoint cannot be supplied simultaneously. --locked-base is strictly for "
+            "Locked Base provenance, and --checkpoint is strictly for resume/continue."
+        )
+
     if locked_base_path:
         from sage.utils.model_utils import load_locked_base_into_p3
         logger.info(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
         load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode or "A")
     elif generic_ckpt_path:
-        logger.info(f"Loading checkpoint from {generic_ckpt_path}...")
+        logger.info(f"Loading checkpoint from {generic_ckpt_path} (resume/continue mechanism)...")
         ckpt = torch.load(generic_ckpt_path, map_location=device, weights_only=False)
         sd = ckpt.get('model_state_dict', ckpt)
-        if p3_mode is not None:
-            from sage.utils.model_utils import load_locked_base_into_p3
-            try:
-                load_locked_base_into_p3(model, sd, p3_mode=p3_mode)
-            except Exception as e:
-                logger.warning(f"load_locked_base_into_p3 strict check skipped ({e}), loading with strict=False...")
-                model.load_state_dict(sd, strict=False)
-        else:
-            model.load_state_dict(sd, strict=False)
+        model.load_state_dict(sd, strict=False)
 
     criterion = CrackBinaryLoss()
     scaler = torch.amp.GradScaler('cuda')

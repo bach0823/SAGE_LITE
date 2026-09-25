@@ -21,6 +21,7 @@ Verifies all 24 required preflight points:
 
 import argparse
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -49,6 +50,34 @@ from scripts.train_crack import (
     DEFAULT_SHARED_PREFIXES,
 )
 from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
+
+
+def resolve_locked_base_path(cfg: dict, locked_base_override: str = None) -> str:
+    """
+    Resolve path to locked base checkpoint.
+    Only explicit --locked-base or 'locked_base_checkpoint' in YAML config is accepted.
+    Generic 'checkpoint' is NEVER accepted as proof of Locked Base provenance.
+    """
+    return locked_base_override or cfg.get('locked_base_checkpoint')
+
+
+def compute_file_sha256(filepath: str) -> str:
+    """Compute SHA256 checksum of a file in streaming chunks."""
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while chunk := f.read(8192 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_preflight_verdict(all_passed: bool, results: list) -> str:
+    if not all_passed or len(results) == 0:
+        return "REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED"
+    all_locked_base_verified = all(r.get('locked_base_ingested', False) for r in results)
+    if all_locked_base_verified:
+        return "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
+    else:
+        return "REAL-DATA P3 LAUNCH PREFLIGHT = GATED (Locked Base Checkpoint required; please supply --locked-base)"
 
 
 def run_single_preflight(config_path: str, data_root_override: str = None, locked_base_override: str = None, num_batches: int = 3):
@@ -127,14 +156,22 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
     ).to(device)
     model.train()
 
-    # Ingest locked-base checkpoint if configured
-    locked_base_path = locked_base_override or cfg.get('locked_base_checkpoint') or cfg.get('checkpoint')
+    # Ingest locked-base checkpoint strictly if configured
+    locked_base_path = resolve_locked_base_path(cfg, locked_base_override=locked_base_override)
     locked_base_provenance = "NOT_PROVEN"
     locked_base_ingested = False
+    ckpt_sha256 = None
+    ckpt_basename = None
 
     if locked_base_path:
         if not os.path.exists(locked_base_path):
             raise FileNotFoundError(f"Locked base checkpoint not found at: {locked_base_path}")
+        
+        ckpt_basename = os.path.basename(locked_base_path)
+        ckpt_sha256 = compute_file_sha256(locked_base_path)
+        print(f"Locked base checkpoint file: {ckpt_basename}")
+        print(f"Locked base checkpoint SHA256: {ckpt_sha256}")
+
         from sage.utils.model_utils import load_locked_base_into_p3
         print(f"Ingesting locked base checkpoint from {locked_base_path} via load_locked_base_into_p3 (p3_mode='{p3_mode}')...")
         load_locked_base_into_p3(model, locked_base_path, p3_mode=p3_mode)
@@ -148,11 +185,11 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
             f"Run {p3_mode}: Model positional_embeddings does not match checkpoint positional_embeddings!"
         )
         locked_base_ingested = True
-        locked_base_provenance = f"VERIFIED ({os.path.basename(locked_base_path)})"
-        print(f"  Locked Base Provenance: VERIFIED from {os.path.basename(locked_base_path)}.")
+        locked_base_provenance = f"VERIFIED_LOCKED_BASE({ckpt_basename})"
+        print(f"  Locked Base Provenance: {locked_base_provenance} (SHA256: {ckpt_sha256[:16]}...).")
     else:
-        locked_base_provenance = "NOT_PROVEN (ImageNet fallback; missing --locked-base)"
-        print("  WARNING: No locked-base checkpoint specified. PE28 derived from default ImageNet PE14.")
+        locked_base_provenance = "NOT_PROVEN"
+        print("  WARNING: No locked-base checkpoint specified. PE28 derived from default ImageNet PE14. Provenance: NOT_PROVEN.")
 
     # Verify PE28 initial buffer state & exact mathematical derivation from PE14
     assert hasattr(model.backbone, "pe28_fixed"), "Model lacks pe28_fixed buffer!"
@@ -539,6 +576,8 @@ def run_single_preflight(config_path: str, data_root_override: str = None, locke
         'pe28_tensor': pe28.cpu().clone(),
         'locked_base_provenance': locked_base_provenance,
         'locked_base_ingested': locked_base_ingested,
+        'checkpoint_sha256': ckpt_sha256,
+        'checkpoint_basename': ckpt_basename,
     }
 
     print(f"\n--> PREFLIGHT SUMMARY FOR {run_id}: ALL 24 INVARIANT CHECKS PASSED!\n")
@@ -586,7 +625,7 @@ def main():
             all_passed = False
             break
 
-    # Cross-run PE28 numerical equality check
+    # Cross-run PE28 numerical equality check & SHA256 integrity check
     if len(all_results) == 3:
         pe28_a = all_results[0]['pe28_tensor']
         pe28_b = all_results[1]['pe28_tensor']
@@ -604,6 +643,22 @@ def main():
         print("Bitwise equality: Run A.pe28_fixed == Run B.pe28_fixed == Run C.pe28_fixed -> PASS")
         print("=" * 80 + "\n")
 
+        # Checkpoint SHA256 assertion across runs
+        sha_a = all_results[0].get('checkpoint_sha256')
+        sha_b = all_results[1].get('checkpoint_sha256')
+        sha_c = all_results[2].get('checkpoint_sha256')
+        if all(r.get('locked_base_ingested', False) for r in all_results):
+            assert sha_a is not None and sha_a == sha_b == sha_c, (
+                f"Checkpoint SHA256 mismatch across runs! Run A: {sha_a}, Run B: {sha_b}, Run C: {sha_c}"
+            )
+            print("=" * 80)
+            print("LOCKED-BASE CHECKPOINT SHA256 INTEGRITY AUDIT")
+            print("=" * 80)
+            print(f"Checkpoint Basename: {all_results[0]['checkpoint_basename']}")
+            print(f"Checkpoint SHA256:   {sha_a}")
+            print("Run A SHA256 == Run B SHA256 == Run C SHA256 -> PASS (Identical)")
+            print("=" * 80 + "\n")
+
     print("\n" + "=" * 80)
     print("FINAL CONSOLIDATED PREFLIGHT REPORT")
     print("=" * 80)
@@ -615,6 +670,10 @@ def main():
 
     if len(all_results) == 3:
         rA, rB, rC = all_results[0], all_results[1], all_results[2]
+        sha_a_str = (str(rA.get('checkpoint_sha256'))[:12] + "...") if rA.get('checkpoint_sha256') else "None"
+        sha_b_str = (str(rB.get('checkpoint_sha256'))[:12] + "...") if rB.get('checkpoint_sha256') else "None"
+        sha_c_str = (str(rC.get('checkpoint_sha256'))[:12] + "...") if rC.get('checkpoint_sha256') else "None"
+
         rows = [
             ("A. Real-data forward", rA['forward_pass'], rB['forward_pass'], rC['forward_pass']),
             ("B. Real-data backward", rA['backward_pass'], rB['backward_pass'], rC['backward_pass']),
@@ -630,19 +689,13 @@ def main():
             ("L. P3 gradient status", rA['p3_grad_status'], rB['p3_grad_status'], rC['p3_grad_status']),
             ("M. PE28 fixed buffer status", rA['pe28_status'], rB['pe28_status'], rC['pe28_status']),
             ("N. Locked Base provenance", rA['locked_base_provenance'], rB['locked_base_provenance'], rC['locked_base_provenance']),
+            ("O. Checkpoint SHA256", sha_a_str, sha_b_str, sha_c_str),
         ]
         for name, a, b, c in rows:
             print(f"| {name:<32} | {a:<16} | {b:<18} | {c:<16} |")
         print(sep)
 
-    all_locked_base_verified = all(r.get('locked_base_ingested', False) for r in all_results)
-    if all_passed and len(all_results) == 3:
-        if all_locked_base_verified:
-            final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
-        else:
-            final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = GATED (Locked Base Checkpoint required; please supply --locked-base)"
-    else:
-        final_verdict = "REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED"
+    final_verdict = compute_preflight_verdict(all_passed, all_results)
     print(f"\n{final_verdict}\n")
 
 if __name__ == "__main__":

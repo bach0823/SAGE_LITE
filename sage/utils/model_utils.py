@@ -456,15 +456,16 @@ def load_locked_base_into_p3(model, checkpoint_or_path, p3_mode: str):
         )
 
     # Synchronize pe28_fixed from the newly loaded base positional_embeddings
+    # Always perform the 2D bicubic interpolation on CPU for bitwise cross-platform determinism
     if hasattr(model.backbone, "pe28_fixed") and hasattr(model.backbone, "positional_embeddings"):
         pos_4d = (
-            model.backbone.positional_embeddings.detach()
+            model.backbone.positional_embeddings.detach().cpu()
             .reshape(1, 14, 14, -1)
             .permute(0, 3, 1, 2)
         )
         pos28_4d = F.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
         pe28_tensor = pos28_4d.permute(0, 2, 3, 1).flatten(1, 2).detach().float()
-        model.backbone.pe28_fixed.copy_(pe28_tensor)
+        model.backbone.pe28_fixed.copy_(pe28_tensor.to(model.backbone.pe28_fixed.device))
 
     logging.info(
         f"[OK] Checkpoint successfully ingested for Run {p3_mode} with strict whitelist: "
