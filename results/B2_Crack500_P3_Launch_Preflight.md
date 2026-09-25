@@ -271,3 +271,59 @@ Sau khi đồ thị và bộ nhớ đã ổn định, thời gian thực thi m�
   - VRAM Reserved luôn $< 9.8$ GB (buffer tự do $\ge 4.8$ GB).
   - Throughput ở steady-state cao hơn và phân bổ đều đặn.
   - Loại bỏ 100% rủi ro gián đoạn buổi huấn luyện do OOM đột xuất.
+
+---
+
+## 7. Khảo Sát Giới Hạn Cực Hạn: Thử Nghiệm Ép Tải Batch Size 16 & Giải Mã Hiện Tượng Allocator (BS16 Stress Test - D12)
+
+*Thời gian thực thi: 2026-09-25*  
+*Môi trường: Google Colab Tesla T4 (14.56 GB VRAM khả dụng), 2 vCPUs*  
+*Phương pháp:* Từng chế độ P3 (Run A, Run B, Run C) được kích hoạt trong **tiến trình độc lập sạch (clean isolated process)** với `batch_size = 16`, `num_batches = 6`, `num_workers = 2`.
+
+### 7.1. Bảng Tổng Hợp 3 Cấp Độ Tải: BS12 vs BS14 vs BS16 (Depth 12 trên Tesla T4)
+
+| Chế độ P3 / Thông số đo | BS12 (Chuẩn) | BS14 (Ép tải nhẹ) | BS16 (Ép tải cực hạn) | Đánh giá Biến thiên & Giới hạn |
+|:---|:---:|:---:|:---:|:---|
+| **Run A (Identity)** | | | | |
+| - Peak Allocated VRAM | 8,262.4 MB (8.07 GB) | 9,672.9 MB (9.45 GB) | **10,807.7 MB (10.55 GB)** | +2.48 GB so với BS12 (+30.8%) |
+| - Peak Reserved VRAM | 9,766.0 MB (9.54 GB) | 11,128.0 MB (10.87 GB) | **12,100.0 MB (11.82 GB)** | VRAM tự do còn **2.74 GB** |
+| - Throughput đo được | 0.44 samples/s | 0.36 samples/s | **0.37 samples/s** | Tương đương BS14 |
+| - 24 Tiêu chí Preflight | PASS 100% | PASS 100% | **PASS 100%** | Không lỗi, không NaN/Inf |
+| **Run B (Generic DW)** | | | | |
+| - Peak Allocated VRAM | 8,313.1 MB (8.12 GB) | 9,970.6 MB (9.74 GB) | **11,128.8 MB (10.87 GB)** | +2.75 GB so với BS12 (+33.9%) |
+| - Peak Reserved VRAM | 8,446.0 MB (8.25 GB) | 10,276.0 MB (10.04 GB) | **11,692.0 MB (11.42 GB)** | VRAM tự do còn **3.14 GB** |
+| - Throughput đo được | 0.41 samples/s | 0.35 samples/s | **0.36 samples/s** | Tương đương BS14 |
+| - 24 Tiêu chí Preflight | PASS 100% | PASS 100% | **PASS 100%** | Không lỗi, không NaN/Inf |
+| **Run C (ASDW)** | | | | |
+| - Peak Allocated VRAM | 8,461.9 MB (8.26 GB) | 10,100.1 MB (9.86 GB) | **11,639.0 MB (11.37 GB)** | +3.11 GB so với BS12 (+37.5%) |
+| - Peak Reserved VRAM | 9,200.0 MB (8.98 GB) | 10,798.0 MB (10.54 GB) | **11,870.0 MB (11.59 GB)** | VRAM tự do còn **2.97 GB** |
+| - Throughput đo được | 0.37 samples/s | 0.31 samples/s | **0.32 samples/s** | Overhead ~13.5% so với Identity |
+| - 24 Tiêu chí Preflight | PASS 100% | PASS 100% | **PASS 100%** | Không lỗi, không NaN/Inf |
+
+---
+
+### 7.2. Giải Mã Hiện Tượng Khoa Học: Vì Sao Phase 0 Báo OOM Nhưng Isolated Run Lại PASS?
+
+Trong báo cáo Phase 0 ban đầu (`results/B2_Crack500_Phase0_Characterization.md`), kịch bản probe ghi nhận BS16 bị `CUDA out of memory`. Tuy nhiên, thử nghiệm độc lập thực tế cho thấy **BS16 hoàn toàn PASS trên cả 3 mode**. Nguyên nhân kỹ thuật cụ thể:
+
+1. **Cơ chế ô nhiễm Allocator trong Vòng lặp đơn (Single-process Loop Contamination):**
+   - Script `run_phase0_probe.py` chạy tuần tự `for bs in [8, 12, 16, 24]` trong cùng một tiến trình Python.
+   - Tại $BS=12$, bộ nhớ đã được cấp phát đỉnh lên tới 14,734 MB Reserved. PyTorch Caching Allocator giữ lại các bộ nhớ đệm này và gây phân mảnh (memory fragmentation).
+   - Khi chuyển sang $BS=16$, dù đã gọi `empty_cache()`, allocator vẫn không gom được khối bộ nhớ liên tục (contiguous block) đủ lớn cho activation tensor kích thước $16 \times 448 \times 448$, dẫn đến OOM sớm.
+2. **Sự thật khi chạy Tiến trình Độc lập (Clean Process Truth):**
+   - Khi chạy bằng tiến trình Python độc lập, CUDA context được khởi tạo từ đầu với vùng nhớ hoàn toàn phẳng, không phân mảnh.
+   - Peak Allocated thực tế của BS16 chỉ là **10.55 GB – 11.37 GB**, và Peak Reserved là **11.42 GB – 11.82 GB**.
+   - Trên GPU Tesla T4 (14.56 GB), hệ thống vẫn còn **dư thừa từ 2.74 GB đến 3.14 GB VRAM**.
+
+---
+
+### 7.3. Tổng Kết Chiến Lược Chọn Cấu Hình Huấn Luyện Toàn Diện
+
+| Cấu hình | Khả năng Thực thi | VRAM Dự phòng | Rủi ro OOM Dài hạn (20-30 epochs) | Đánh giá & Quyết định |
+|:---:|:---:|:---:|:---:|:---|
+| **BS = 16** | Khả thi (PASS 100%) | ~2.74 – 3.14 GB | **Trung bình - Cao** (Dễ dính OOM khi cache phân mảnh sau nhiều epoch hoặc khi chạy validation 348 ảnh) | Dùng làm mốc chứng minh giới hạn trần vật lý |
+| **BS = 14** | Khả thi (PASS 100%) | ~3.69 – 4.52 GB | **Thấp - Trung bình** | Vùng biên dung sai |
+| **BS = 12** | **Tối ưu tuyệt đối** | **~4.78 – 5.10 GB** | **Gần như bằng 0 (Zero-risk)** | **CHỐT CHÍNH THỨC (Gold Standard)** |
+
+> **Phán Quyết Khoa Học Cuối Cùng:**  
+> Dù BS16 hoàn toàn có thể chạy được về mặt vật lý, **`batch_size = 12` là lựa chọn tối ưu nhất và an toàn tuyệt đối** cho các cuộc thử nghiệm huấn luyện chính thức (Phase 1 Base Training và Phase 7 P3 Comparison).

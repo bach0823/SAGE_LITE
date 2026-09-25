@@ -29,7 +29,7 @@
 ---
 
 ## 3. Năm Kết Luận Kỹ Thuật Trọng Tâm
-1. **Trần Vật Lý VRAM:** Toàn bộ 3 depth đều OOM tại $BS=16$. $BS=12$ là giới hạn kịch trần (D12 chiếm 14,734 MB, chỉ còn 178 MB buffer). Cần dọn cache sau mỗi epoch hoặc chọn $BS=8$ nếu muốn buffer dư dả (> 5 GB).
+1. **Trần Vật Lý VRAM Trong Single-Process Probe:** Toàn bộ 3 depth đều OOM tại $BS=16$ khi chạy tuần tự các batch size trong cùng 1 process do hiện tượng phân mảnh PyTorch allocator. (Lưu ý: Khi chạy độc lập trong process riêng biệt, $BS=14$ và $BS=16$ đều PASS; xem chi tiết tại Section 7 của `results/B2_Crack500_P3_Launch_Preflight.md`). $BS=12$ vẫn là mốc tối ưu an toàn tuyệt đối với buffer > 4.8 GB.
 2. **Điểm Nghẽn Tính Toán:** Bước huấn luyện bị chi phối 95-97% bởi GPU (Forward + Backward mất 3.8s - 5.1s). DataLoader chỉ mất 0.3 - 0.8 ms. Cấu hình `num_workers = 2` là tối ưu nhất cho môi trường 2-vCPU của Colab.
 3. **Tỷ Lệ Tăng Tốc ViT Depth:** D4 (613.3 s/epoch) nhanh hơn D12 (837.4 s/epoch) ~26.8%; D6 nhanh hơn D12 ~16.4%.
 4. **Ngân Sách Khuyến Nghị:** $N_{\text{total}} = 20\text{ epochs}$ (Stage 1 = 8 epochs, Stage 2 = 12 epochs) kèm Early Stopping `patience = 5`.
