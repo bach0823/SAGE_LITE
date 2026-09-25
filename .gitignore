@@ -207,6 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 # Experiment logs and results
-results/
+results/*
+!results/*.md
 *.npz
 
