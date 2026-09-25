@@ -68,3 +68,97 @@
 * **Toàn vẹn Phần cứng & Tính toán:** **VERIFIED 100% READY**.
 * **Launch Gate:** **GATED** (Đúng quy trình: Chờ nạp Locked Base Depth 12 chính thức sau khi hoàn thành Phase 1 Base training).
 * **Quy tắc:** Tuyệt đối KHÔNG bắt đầu Phase 7 (30 epochs P3) khi chưa mở cổng Launch Gate.
+
+---
+
+## 4. Đánh Giá Chuyên Sâu & Phân Tích Kết Quả (Analysis & Critical Caveats)
+
+Kết quả này **đạt mục tiêu của preflight runtime P3**, nhưng cần phân định rành mạch giữa **“những gì đã được chứng minh”** và **“những gì chưa thể dùng làm bằng chứng khoa học”**.
+
+### 4.1. Điều Đã Được Chứng Minh (Proven Points)
+**Run A, B, C đều chạy hoàn chỉnh trên Crack500 thực tế với Depth 12, Batch Size 12 trên Tesla T4 (Google Colab).**
+
+Cả ba chế độ đều vượt qua toàn bộ các khâu cốt lõi:
+1. **Forward pass:** PASS trên ảnh thực $448 \times 448$.
+2. **Backward pass:** PASS, gradient lan truyền thông suốt.
+3. **Optimizer step:** PASS, cập nhật trọng số đúng định dạng.
+4. **Stage 1 $\to$ Stage 2 reload:** PASS, transition mượt mà, không lệch tensor.
+5. **Freeze / Shared Experts:** `set_shared_experts([0, 1, 2, 3])` PASS, đúng 132 tensor CNN blocks được mở khóa huấn luyện.
+6. **Stage 2 forward/backward:** PASS, tính toán phân luồng router và loss hoàn chỉnh.
+7. **Checkpoint save/reload:** PASS, serialize và restore trạng thái mô hình/optimizer nguyên vẹn.
+8. **Kiểm tra số học:** Hoàn toàn sạch số học (KHÔNG có NaN / Inf).
+9. **Buffer PE28:** Đúng kích thước `(1, 784, 192)`, FP32, hoàn toàn frozen (`requires_grad = False`, gradient = `None`).
+10. **Phân nhóm tham số:**
+    - Run B & C: Có đủ 10 tensor tham số P3 với gradient hữu hạn nằm trong nhóm `other_and_routers`.
+    - Run A: Đúng bản chất Identity control, 0 tham số P3.
+11. **Tính cô lập dữ liệu:** Validation pipeline chạy đúng trên tập **Val** (348 cặp ảnh), tuyệt đối không chạm vào thư mục **Test**.
+
+> **Kết luận Software / Runtime Feasibility:** P3 Run A/B/C đã chính thức vượt qua smoke test thực tế trên phần cứng mục tiêu T4.
+
+---
+
+### 4.2. Khả Năng An Toàn Bộ Nhớ Ở Batch Size 12 (Memory Safety at BS12)
+* **Peak Allocated VRAM:**
+  - Run A (Identity): **8,257.7 MB** (~8.06 GB)
+  - Run B (Generic DW): **8,477.8 MB** (~8.28 GB)
+  - Run C (ASDW): **8,689.6 MB** (~8.49 GB)
+* **Peak Reserved VRAM:** Dao động từ ~9.46 GB đến ~9.78 GB.
+
+Trên phần cứng Tesla T4 16GB (khả dụng thực tế ~14.56 GB), lượng VRAM tự do dự phòng còn lại đạt khoảng **~4.78 GB đến ~5.1 GB**.  
+Điều này khẳng định rằng **ở quy mô batch preflight, BS12 hoàn toàn an toàn và không bị OOM**.
+
+---
+
+### 4.3. Cảnh Báo Nhiễu Throughput (Throughput Contamination Caveat)
+Số liệu throughput đo được trong suite preflight:
+* Run A: 0.21 samples/s (Stage 1 mất 104.6s)
+* Run B: 0.65 samples/s (Stage 1 mất 35.6s)
+* Run C: 0.99 samples/s (Stage 1 mất 34.8s)
+
+> [!CAUTION]
+> **Con số này hoàn toàn là artifact do chạy gộp cả 3 run liên tiếp trong cùng một tiến trình Python (single process):**
+> 1. **Run A chịu toàn bộ chi phí khởi tạo ban đầu:** Bao gồm khởi tạo CUDA context, nạp thư viện `timm`, tải pretrained weights từ Hugging Face Hub, cấp phát bộ nhớ ban đầu và build graph PyTorch (tiêu tốn tới 104.6s ở Stage 1).
+> 2. **Run B chạy sau khi CUDA allocator đã được "làm ấm" (warmed-up):** Trọng số và thư viện đã nằm trong cache RAM/VRAM nên thời gian chỉ còn 35.6s.
+> 3. **Run C chạy cuối cùng:** Hệ thống đã hoàn toàn ở trạng thái cached tối đa nên thời gian tiếp tục giảm còn 34.8s.
+>
+> ➡️ **TUYỆT ĐỐI KHÔNG ĐƯỢC KẾT LUẬN "ASDW NHANH HƠN IDENTITY GẤP 4 LẦN".**  
+> Để có phép so sánh throughput công bằng, bắt buộc phải chạy từng mode trong một tiến trình (process) độc lập riêng biệt hoặc thực hiện đo đạc sau khi đã warm-up ít nhất 1 epoch/nhiều batch.
+
+---
+
+### 4.4. Tín Hiệu Kiến Trúc Từ Peak Allocated Memory
+Trái ngược với Throughput bị nhiễu do warm-up, chỉ số **Peak Memory Allocated** lại phản ánh độ chính xác và tính logic cao của kiến trúc:
+* **Run A (Identity - không thêm tham số/features mới):** **8,257.7 MB**
+* **Run B (Generic DW conv 7x7):** **8,477.8 MB** (+220.1 MB cho intermediate feature maps của DW conv)
+* **Run C (ASDW multi-scale & dynamic routing):** **8,689.6 MB** (+431.9 MB so với Identity, +211.8 MB so với Generic DW)
+
+Sự gia tăng này là bằng chứng rõ ràng cho thấy:
+1. Nhánh Run C thực sự thực hiện tính toán và lưu trữ activation buffers cho các nhánh multi-scale và cổng routing.
+2. Mức overhead bộ nhớ của ASDW chỉ là **~432 MB ở BS12**, cực kỳ tối ưu và hoàn toàn nằm trong ngưỡng an toàn của GPU 16GB.
+
+---
+
+### 4.5. Giải Trình Trạng Thái GATED (Expected Safe Behavior)
+Kết quả suite preflight trả về trạng thái `GATED` là **hoàn toàn chính xác theo đúng nguyên tắc thiết kế**:
+* Script preflight này đóng vai trò là chốt chặn an toàn (Launch Gate) ngăn ngừa việc huấn luyện Stage 2 P3 từ trọng số ngẫu nhiên hoặc checkpoint không rõ nguồn gốc.
+* Do chưa hoàn thành Phase 1 Base training cho Depth 12 trên Crack500 nên chưa có checkpoint base chính thức được khóa hash (`--locked-base`).
+* Việc hệ thống từ chối mở cổng là bằng chứng cho thấy cơ chế phòng thủ tính toàn vẹn khoa học hoạt động hoàn hảo.
+
+---
+
+### 4.6. Ý Nghĩa Của Chỉ Số Validation Dice / Loss Ban Đầu
+Chỉ số Validation Dice ghi nhận được (~0.07 - 0.08) và Loss (~2.07 - 2.08) chỉ được tính toán trên **2 mẫu validation ngẫu nhiên**:
+* Mục đích duy nhất của bước này là **Sanity Check**: Xác minh hàm tính metric không bị crash, không phát sinh NaN/Inf, và pipeline validation tương thích tuyệt đối với cấu trúc đầu ra của mô hình.
+* Các con số này **KHÔNG CÓ GIÁ TRỊ** để kết luận hoặc so sánh chất lượng phân đoạn giữa Run A, B và C trước khi mô hình được huấn luyện đầy đủ.
+
+---
+
+### 4.7. Kết Luận & Hành Động Tiếp Theo (Action Items)
+
+1. **Về Code & Kiến trúc:**
+   - Toàn bộ source code P3 (Run A, B, C), cơ chế 2-stage training, dynamic routing, và nội suy PE28 trên Depth 12, Batch Size 12 đã **HOÀN TOÀN SẴN SÀNG (100% READY)**. Không cần can thiệp hay sửa đổi thêm code mô hình.
+2. **Về Cấu Hình Huấn Luyện:**
+   - Chốt cấu hình mục tiêu cho cuộc thử nghiệm chính thức trên Tesla T4: **`num_transformer_layers = 12` (D12), `batch_size = 12` (BS12), `num_workers = 2`**.
+3. **Kế Hoạch Thực Thi Kế Tiếp:**
+   - **Đo Throughput Tinh Khiết (Isolated Benchmarking):** Nếu cần số liệu throughput chuẩn xác để đưa vào báo cáo khoa học, chạy 3 lệnh CLI độc lập trong các tiến trình riêng biệt (mỗi lệnh một cell Colab) với 5–10 batches.
+   - **Triển khai Huấn luyện Phase 1 (Base Model Training):** Chạy huấn luyện Base Model (Stage 1) trên Crack500 để sinh ra checkpoint `locked_base` chính thức và tạo SHA256 hash mở khóa Launch Gate cho Phase 7 (P3 Training).
