@@ -20,6 +20,7 @@ Branch: crack500-audit
 import argparse
 import csv
 import datetime
+import hashlib
 import json
 import logging
 import math
@@ -173,35 +174,85 @@ def discover_routers(model: B2ConvNeXtViTUNet) -> List[Dict[str, Any]]:
 
 def discover_experts(model: B2ConvNeXtViTUNet, sage_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Discover expert pool structure and metadata:
-    - index: int (0..M-1)
-    - name: str
-    - type: 'CNN' or 'ViT'
-    - is_shared: bool
+    Discover expert pool structure and metadata from actual model attributes.
+    Derives expert type (CNN vs ViT) dynamically from expert module metadata (expert_type)
+    or router expert_infos rather than assuming index 0..3 is CNN and index 4.. is ViT.
     """
-    num_experts = len(model.expert_pool) if hasattr(model, "expert_pool") and model.expert_pool is not None else 16
+    expert_pool = getattr(model, "expert_pool", None)
+    num_experts = len(expert_pool) if expert_pool is not None else 16
     shared_indices = set(sage_cfg.get("shared_expert_indices", [0, 1, 2, 3]))
 
+    # Retrieve expert_infos from any available router if present
+    router_expert_infos = None
+    for module in model.modules():
+        if isinstance(module, SageRouter) and getattr(module, "expert_infos", None):
+            router_expert_infos = module.expert_infos
+            break
+
     experts: List[Dict[str, Any]] = []
+    cnn_count = 0
+    vit_count = 0
+
     for e_idx in range(num_experts):
-        if e_idx < 4:
-            e_type = "CNN"
-            e_name = f"CNN_Stage_{e_idx}"
+        expert_type_attr = None
+        expert_name_attr = None
+
+        # 1. Query expert_pool module attributes
+        if expert_pool is not None and e_idx < len(expert_pool):
+            exp_mod = expert_pool[e_idx]
+            expert_type_attr = getattr(exp_mod, "expert_type", None)
+            expert_name_attr = getattr(exp_mod, "expert_name", None)
+
+        # 2. Query router.expert_infos metadata if not found on module
+        if (expert_type_attr is None or expert_name_attr is None) and router_expert_infos and e_idx < len(router_expert_infos):
+            info = router_expert_infos[e_idx]
+            if expert_type_attr is None:
+                expert_type_attr = info.get("type", None)
+            if expert_name_attr is None:
+                expert_name_attr = info.get("name", None)
+
+        # Determine normalized family: 'CNN' vs 'ViT'
+        if expert_type_attr is not None:
+            raw_str = str(expert_type_attr).strip().lower()
+            if "cnn" in raw_str or "conv" in raw_str:
+                family = "CNN"
+            elif "transformer" in raw_str or "vit" in raw_str or "attn" in raw_str:
+                family = "ViT"
+            else:
+                family = raw_str.upper()
         else:
-            e_type = "ViT"
-            e_name = f"ViT_Block_{e_idx - 4}"
+            family = "CNN" if e_idx < 4 else "ViT"
+
+        # Determine canonical reporting name
+        if family == "CNN":
+            e_name = f"CNN_Stage_{cnn_count}"
+            cnn_count += 1
+        elif family == "ViT":
+            e_name = f"ViT_Block_{vit_count}"
+            vit_count += 1
+        else:
+            e_name = expert_name_attr or f"Expert_{e_idx}"
 
         experts.append({
             "index": e_idx,
             "column_name": f"E{e_idx}",
             "name": e_name,
-            "type": e_type,
+            "type": family,
             "is_shared": (e_idx in shared_indices),
         })
 
     logger.info(f"Discovered expert pool size: {len(experts)} ({sum(1 for e in experts if e['type'] == 'CNN')} CNN, "
                 f"{sum(1 for e in experts if e['type'] == 'ViT')} ViT, Shared: {sorted(list(shared_indices))}).")
     return experts
+
+
+def compute_file_sha256(filepath: str) -> str:
+    """Compute SHA256 checksum of a file."""
+    hasher = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def load_model_from_checkpoint(
@@ -212,6 +263,8 @@ def load_model_from_checkpoint(
 ) -> Tuple[B2ConvNeXtViTUNet, Dict[str, Any], Dict[str, Any]]:
     """
     Safely instantiate the model matching config and load trained checkpoint.
+    Includes rigorous SHA256 computation, metadata compatibility validation,
+    and strict parameter completeness verification.
     """
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
@@ -240,13 +293,51 @@ def load_model_from_checkpoint(
         p3_mode=p3_mode,
     ).to(device)
 
-    # Load checkpoint
+    # 1. Checkpoint existence & SHA256 verification
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
 
-    logger.info(f"Loading checkpoint from: {checkpoint_path}")
+    checkpoint_sha256 = compute_file_sha256(checkpoint_path)
+    logger.info(f"Loading checkpoint from: {checkpoint_path} (SHA256: {checkpoint_sha256})")
     raw_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
+    # 2. Extract and verify checkpoint metadata
+    ckpt_metadata: Dict[str, Any] = {"sha256": checkpoint_sha256}
+    if isinstance(raw_checkpoint, dict):
+        for field in ["stage", "epoch", "best_dice", "best_loss", "p3_mode", "num_transformer_layers", "model_type"]:
+            if field in raw_checkpoint:
+                val = raw_checkpoint[field]
+                if isinstance(val, (torch.Tensor, np.generic)):
+                    val = val.item()
+                ckpt_metadata[field] = val
+
+    # Verify metadata compatibility against configuration
+    if "p3_mode" in ckpt_metadata and ckpt_metadata["p3_mode"] is not None:
+        ckpt_p3 = str(ckpt_metadata["p3_mode"]).upper()
+        cfg_p3 = str(p3_mode).upper() if p3_mode is not None else None
+        if cfg_p3 is not None and ckpt_p3 != cfg_p3:
+            raise ValueError(
+                f"Checkpoint metadata mismatch: p3_mode in checkpoint is '{ckpt_p3}', "
+                f"but config specifies '{cfg_p3}'!"
+            )
+        if cfg_p3 == "C" and ckpt_p3 != "C":
+            raise ValueError(
+                f"Canonical P3-C audit requires p3_mode='C', but checkpoint metadata has '{ckpt_p3}'!"
+            )
+
+    if "num_transformer_layers" in ckpt_metadata and ckpt_metadata["num_transformer_layers"] is not None:
+        ckpt_depth = int(ckpt_metadata["num_transformer_layers"])
+        if ckpt_depth != vit_depth:
+            raise ValueError(
+                f"Checkpoint metadata mismatch: num_transformer_layers in checkpoint is {ckpt_depth}, "
+                f"but config specifies {vit_depth}!"
+            )
+        if vit_depth == 12 and ckpt_depth != 12:
+            raise ValueError(
+                f"Canonical P3-C audit requires num_transformer_layers=12, but checkpoint metadata has {ckpt_depth}!"
+            )
+
+    # 3. Clean and verify state dict
     if isinstance(raw_checkpoint, dict):
         if "model_state_dict" in raw_checkpoint:
             state_dict = raw_checkpoint["model_state_dict"]
@@ -264,13 +355,42 @@ def load_model_from_checkpoint(
         cleaned_state_dict[clean_k] = v
 
     # Model compatibility audit
-    model_keys = set(model.state_dict().keys())
+    model_state = model.state_dict()
+    model_keys = set(model_state.keys())
     ckpt_keys = set(cleaned_state_dict.keys())
     missing_keys = model_keys - ckpt_keys
     unexpected_keys = ckpt_keys - model_keys
 
+    # Check for structurally important parameters and fail loudly
+    critical_submodules = ("router", "backbone", "decoder", "p3_refinement", "sa_hub")
+    missing_critical = [k for k in missing_keys if any(sub in k for sub in critical_submodules)]
+
+    if missing_critical:
+        missing_router = [k for k in missing_critical if "router" in k]
+        if missing_router:
+            raise ValueError(
+                f"CRITICAL AUDIT FAILURE: Checkpoint is missing {len(missing_router)} SAGE router parameter(s)! "
+                f"Missing keys include: {missing_router[:5]}. Aborting evaluation."
+            )
+        raise ValueError(
+            f"CRITICAL AUDIT FAILURE: Checkpoint is missing {len(missing_critical)} structurally important parameter(s)! "
+            f"Missing keys include: {missing_critical[:5]}. Aborting evaluation."
+        )
+
     if missing_keys:
-        logger.warning(f"Checkpoint missing {len(missing_keys)} keys: {sorted(list(missing_keys))[:5]}...")
+        missing_numel = sum(model_state[k].numel() for k in missing_keys)
+        total_numel = sum(p.numel() for p in model.parameters())
+        missing_ratio = missing_numel / total_numel if total_numel > 0 else 1.0
+        if missing_ratio > 0.01:
+            raise ValueError(
+                f"CRITICAL AUDIT FAILURE: Checkpoint is missing substantial portion of parameters: "
+                f"{len(missing_keys)} keys ({missing_numel:,} parameters, {missing_ratio:.2%})! "
+                f"Missing keys include: {sorted(list(missing_keys))[:5]}. Aborting evaluation."
+            )
+        logger.warning(
+            f"Checkpoint has {len(missing_keys)} non-critical missing keys ({missing_ratio:.4%}): {sorted(list(missing_keys))[:5]}"
+        )
+
     if unexpected_keys:
         logger.warning(f"Checkpoint contains {len(unexpected_keys)} unexpected keys: {sorted(list(unexpected_keys))[:5]}...")
 
@@ -278,13 +398,8 @@ def load_model_from_checkpoint(
     load_res = model.load_state_dict(cleaned_state_dict, strict=False)
     logger.info(f"Model state dict loaded. Missing: {len(load_res.missing_keys)}, Unexpected: {len(load_res.unexpected_keys)}")
 
-    # Crucial router weight check: verify at least router parameters loaded successfully
-    router_keys = [k for k in ckpt_keys if "router" in k]
-    if not router_keys:
-        raise ValueError("Checkpoint does not contain any 'router' parameters! Cannot perform routing analysis.")
-
     model.eval()
-    return model, config, raw_checkpoint if isinstance(raw_checkpoint, dict) else {}
+    return model, config, ckpt_metadata
 
 
 def compute_entropy_and_concentration(distribution: np.ndarray) -> Dict[str, float]:
@@ -331,10 +446,11 @@ def compute_entropy_and_concentration(distribution: np.ndarray) -> Dict[str, flo
     }
 
 
-def compute_normalized_affinity_entropy(gating_weights_list: List[List[float]]) -> float:
+def compute_normalized_gating_weight_entropy(gating_weights_list: List[List[float]]) -> float:
     """
-    Computes mean normalized selected affinity entropy across evaluated samples for top-k selections.
-    Normalized by log2(K).
+    Computes mean normalized selected gating weight entropy across evaluated samples for top-k selections.
+    Normalized by log2(K). Note: SageRouter gating_weights are sigmoid(top_k_logits) after modulation,
+    representing the normalized distribution over selected experts.
     """
     entropies = []
     for weights in gating_weights_list:
@@ -612,7 +728,7 @@ def main():
     for c in collectors:
         r_dist = per_router_distribution_map[c.name]
         stats = compute_entropy_and_concentration(r_dist)
-        norm_affinity_entropy = compute_normalized_affinity_entropy(c.gating_weights)
+        norm_gating_entropy = compute_normalized_gating_weight_entropy(c.gating_weights)
 
         entropy_rows.append({
             "Router": c.name,
@@ -622,12 +738,12 @@ def main():
             "Max_Expert_Share": f"{stats['max_expert_share']:.4f}",
             "HHI_Concentration": f"{stats['hhi_concentration']:.4f}",
             "Effective_Num_Experts": f"{stats['effective_num_experts']:.2f}",
-            "Normalized_Selected_Affinity_Entropy": f"{norm_affinity_entropy:.4f}",
+            "Normalized_Selected_Gating_Weight_Entropy": f"{norm_gating_entropy:.4f}",
         })
 
     entropy_csv_path = os.path.join(args.output_dir, "entropy_concentration.csv")
     with open(entropy_csv_path, "w", newline="", encoding="utf-8") as f:
-        fieldnames = ["Router", "Layer_Type", "Entropy_Bits", "Normalized_Entropy", "Max_Expert_Share", "HHI_Concentration", "Effective_Num_Experts", "Normalized_Selected_Affinity_Entropy"]
+        fieldnames = ["Router", "Layer_Type", "Entropy_Bits", "Normalized_Entropy", "Max_Expert_Share", "HHI_Concentration", "Effective_Num_Experts", "Normalized_Selected_Gating_Weight_Entropy"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(entropy_rows)
@@ -763,6 +879,15 @@ def main():
             "split": args.split,
             "num_samples": evaluated_samples_count,
             "checkpoint": os.path.abspath(args.checkpoint),
+            "checkpoint_sha256": ckpt_meta.get("sha256", ""),
+            "checkpoint_metadata": {
+                "stage": ckpt_meta.get("stage"),
+                "epoch": ckpt_meta.get("epoch"),
+                "best_dice": ckpt_meta.get("best_dice"),
+                "best_loss": ckpt_meta.get("best_loss"),
+                "p3_mode": ckpt_meta.get("p3_mode"),
+                "num_transformer_layers": ckpt_meta.get("num_transformer_layers"),
+            },
             "config": os.path.abspath(args.config),
             "data_root": config.get("root_dir", ""),
             "evaluation_mode": "eval",
