@@ -99,20 +99,48 @@ def get_git_commit_hash() -> str:
         return "UNKNOWN_COMMIT"
 
 
+def compute_sample_gating_entropy(routing_infos: Any) -> float:
+    """
+    Computes sample-level routing entropy H_routing = -sum(p_k * log2(p_k))
+    from the normalized top-k gating weights across all active SAGE layers.
+    For top-k=4, theoretical max is log2(4) = 2.0 bits.
+    """
+    if isinstance(routing_infos, dict):
+        infos = routing_infos.get('all', [])
+    elif isinstance(routing_infos, list):
+        infos = routing_infos
+    else:
+        infos = []
+
+    entropies = []
+    for info in infos:
+        if isinstance(info, dict) and 'gating_weights_sample_0' in info:
+            w = np.array(info['gating_weights_sample_0'], dtype=np.float64)
+            s = float(w.sum())
+            if s > 1e-8:
+                p = w / s
+                p_pos = p[p > 1e-8]
+                h = -float(np.sum(p_pos * np.log2(p_pos)))
+                entropies.append(h)
+    return float(np.mean(entropies)) if entropies else 0.0
+
+
 def calculate_routing_statistics(model: nn.Module) -> Dict[str, Any]:
     """
-    Computes entropy, active expert count, and utilization distribution across all SageRouters.
+    Calculates expert-utilization statistics across all SageRouters.
+    H_usage = -sum(u_e * log2(u_e)) measures the entropy of expert selection frequency across the pool.
+    For pool_size=16, theoretical max is log2(16) = 4.0 bits.
     """
     routers = [m for m in model.modules() if isinstance(m, SageRouter)]
     if not routers:
         return {
-            "mean_entropy": 0.0,
+            "expert_utilization_entropy": 0.0,
             "active_experts": 0,
             "expert_utilization_pct": 0.0,
             "total_calls": 0,
         }
 
-    entropies = []
+    usage_entropies = []
     total_usage = None
     total_calls = 0
 
@@ -129,7 +157,7 @@ def calculate_routing_statistics(model: nn.Module) -> Dict[str, Any]:
                 # Shannon entropy in bits (base 2)
                 p_pos = p[p > 0]
                 entropy = -float(np.sum(p_pos * np.log2(p_pos)))
-                entropies.append(entropy)
+                usage_entropies.append(entropy)
 
         if hasattr(r, 'total_calls'):
             total_calls += int(r.total_calls.item())
@@ -137,21 +165,48 @@ def calculate_routing_statistics(model: nn.Module) -> Dict[str, Any]:
     pool_size = len(total_usage) if total_usage is not None else 16
     active_count = int(np.sum(total_usage > 0)) if total_usage is not None else 0
     utilization_pct = (active_count / pool_size * 100.0) if pool_size > 0 else 0.0
-    mean_entropy = float(np.mean(entropies)) if entropies else 0.0
+    mean_usage_entropy = float(np.mean(usage_entropies)) if usage_entropies else 0.0
 
     return {
-        "mean_entropy": round(mean_entropy, 4),
+        "expert_utilization_entropy": round(mean_usage_entropy, 4),
         "active_experts": active_count,
+        "pool_size": pool_size,
         "expert_utilization_pct": round(utilization_pct, 2),
         "total_calls": total_calls,
     }
+
+
+def create_reproducible_train_loader(
+    dataset: torch.utils.data.Dataset,
+    batch_size: int,
+    num_workers: int,
+    seed: int = 42,
+    pin_memory: bool = True,
+) -> DataLoader:
+    """
+    Creates an independent, fully reproducible DataLoader instance with a fresh generator.
+    Guarantees every candidate trial encounters the exact same sequence of mini-batches.
+    """
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        worker_init_fn=seed_worker,
+        generator=g,
+        pin_memory=pin_memory,
+        drop_last=False,
+    )
 
 
 def run_screening_trial(
     candidate_id: str,
     base_config: dict,
     trial_params: dict,
-    train_loader: DataLoader,
+    train_dataset: torch.utils.data.Dataset,
+    loader_workers: int,
     val_pairs: List[Tuple[str, str]],
     device: torch.device,
     stage1_epochs: int = 3,
@@ -186,6 +241,7 @@ def run_screening_trial(
     sage_cfg['logit_modulation'] = True # Fixed protocol
 
     vit_depth = int(cfg.get('num_transformer_layers', 12))
+    batch_size = int(cfg.get('batch_size', 14))
     img_size = int(cfg.get('img_size', 448))
     seed = int(cfg.get('seed', 42))
 
@@ -194,8 +250,8 @@ def run_screening_trial(
     print_banner(f"STARTING PHASE 1 SCREENING TRIAL: {candidate_id}")
     print(f"Hyperparameters: LR={lr:.2e} | Stage-2 Base={stage2_base_lr:.2e} | Stage-2 Shared={stage2_shared_lr:.2e}")
     print(f"SAGE Configuration: top_k={top_k}, router_hidden_dim={router_hidden_dim}, lb_factor={lb_factor}")
-    print(f"Protocol: ViT Depth={vit_depth}, BS={train_loader.batch_size}, Seed={seed}, p3_mode=None (Base)")
-    print(f"Budgets: Stage 1 = {stage1_epochs} epochs | Stage 2 = {stage2_epochs} epochs (Warmup: {warmup_epochs})")
+    print(f"Protocol: ViT Depth={vit_depth}, BS={batch_size}, Seed={seed}, p3_mode=None (Pure Base)")
+    print(f"Budgets: Short-Horizon Screening | Stage 1 = {stage1_epochs} ep | Stage 2 = {stage2_epochs} ep (Warmup: {warmup_epochs})")
 
     if device.type == 'cuda':
         torch.cuda.empty_cache()
@@ -220,11 +276,21 @@ def run_screening_trial(
 
     start_trial_time = time.perf_counter()
     nan_inf_detected = False
+    epoch_durations = []
 
     # =========================================================================
     # STAGE 1: Free Exploration & Initialization
     # =========================================================================
     print(f"\n--- [Stage 1 Training ({stage1_epochs} Epochs)] ---")
+    set_seed(seed)
+    stage1_loader = create_reproducible_train_loader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=loader_workers,
+        seed=seed,
+        pin_memory=(device.type == 'cuda'),
+    )
+
     stage1_groups = get_optimizer_groups(
         model,
         lr_backbone=lr * 0.1,
@@ -242,18 +308,22 @@ def run_screening_trial(
         t_in_epochs=True,
     )
 
+    stage1_final_val_dice = 0.0
+    stage1_final_val_loss = float('inf')
     stage1_best_val_dice = -1.0
     stage1_best_val_loss = float('inf')
     best_stage1_weights = None
+    s1_sample_entropies = []
 
     for epoch in range(1, stage1_epochs + 1):
         t_ep_start = time.perf_counter()
         model.train() # Exploration noise is naturally active
         train_loss, train_seg_loss, train_lb_loss = 0.0, 0.0, 0.0
         train_dice, train_iou = 0.0, 0.0
+        train_sample_entropy = 0.0
         batches_processed = 0
 
-        for b_idx, batch in enumerate(train_loader, 1):
+        for b_idx, batch in enumerate(stage1_loader, 1):
             if dry_run and b_idx > 2:
                 break
 
@@ -270,7 +340,8 @@ def run_screening_trial(
                 routing_infos = fwd_out['routing_infos']
                 lb_loss = model.compute_total_load_balance_loss(routing_infos)
                 seg_loss = criterion(logits, labels)
-                total_loss = seg_loss + lb_factor * lb_loss
+                # Audit Note: lb_loss is ALREADY multiplied by self.load_balance_factor inside SageRouter.compute_load_balance_loss()
+                total_loss = seg_loss + 1.0 * lb_loss
 
             if not torch.isfinite(total_loss):
                 print(f"  [ERROR] Non-finite loss at Stage 1, Epoch {epoch}, Batch {b_idx}: {total_loss.item()}")
@@ -290,12 +361,14 @@ def run_screening_trial(
 
             probs = torch.sigmoid(logits)
             _, d_val, iou_val = calculate_binary_metrics(probs, labels)
+            sample_h = compute_sample_gating_entropy(routing_infos)
 
             train_loss += total_loss.item()
             train_seg_loss += seg_loss.item()
             train_lb_loss += lb_loss.item()
             train_dice += d_val
             train_iou += iou_val
+            train_sample_entropy += sample_h
             batches_processed += 1
 
         sched1.step(epoch)
@@ -305,6 +378,7 @@ def run_screening_trial(
         avg_train_dice = train_dice / num_b
         avg_train_iou = train_iou / num_b
         avg_train_lb = train_lb_loss / num_b
+        s1_sample_entropies.append(train_sample_entropy / num_b)
 
         # Validation evaluation (strictly Val set)
         model.eval()
@@ -323,8 +397,12 @@ def run_screening_trial(
                 )
 
         ep_duration = time.perf_counter() - t_ep_start
+        epoch_durations.append(ep_duration)
         val_dice = float(val_metrics.get('dice', 0.0))
         val_loss = float(val_metrics.get('loss', 0.0))
+
+        stage1_final_val_dice = val_dice
+        stage1_final_val_loss = val_loss
 
         if val_dice > stage1_best_val_dice:
             stage1_best_val_dice = val_dice
@@ -350,6 +428,16 @@ def run_screening_trial(
     model.set_shared_experts(shared_indices)
     print(f"  Stage 2 shared experts initialized: {shared_indices}")
 
+    # Stage 2 DataLoader: Fresh instance with fixed seed (seed + 1000) for deterministic comparability across candidates
+    set_seed(seed + 1000)
+    stage2_loader = create_reproducible_train_loader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=loader_workers,
+        seed=seed + 1000,
+        pin_memory=(device.type == 'cuda'),
+    )
+
     opt2 = create_stage2_optimizer(
         model,
         stage2_base_lr=stage2_base_lr,
@@ -364,18 +452,23 @@ def run_screening_trial(
         t_in_epochs=True,
     )
 
+    stage2_final_val_dice = 0.0
+    stage2_final_val_loss = float('inf')
+    stage2_final_val_iou = 0.0
     stage2_best_val_dice = -1.0
     stage2_best_val_loss = float('inf')
     stage2_best_val_iou = 0.0
+    s2_sample_entropies = []
 
     for epoch in range(1, stage2_epochs + 1):
         t_ep_start = time.perf_counter()
         model.train() # Exploration noise is active
         train_loss, train_seg_loss, train_lb_loss = 0.0, 0.0, 0.0
         train_dice, train_iou = 0.0, 0.0
+        train_sample_entropy = 0.0
         batches_processed = 0
 
-        for b_idx, batch in enumerate(train_loader, 1):
+        for b_idx, batch in enumerate(stage2_loader, 1):
             if dry_run and b_idx > 2:
                 break
 
@@ -392,7 +485,8 @@ def run_screening_trial(
                 routing_infos = fwd_out['routing_infos']
                 lb_loss = model.compute_total_load_balance_loss(routing_infos)
                 seg_loss = criterion(logits, labels)
-                total_loss = seg_loss + lb_factor * lb_loss
+                # Audit Note: lb_loss is ALREADY multiplied by self.load_balance_factor inside SageRouter.compute_load_balance_loss()
+                total_loss = seg_loss + 1.0 * lb_loss
 
             if not torch.isfinite(total_loss):
                 print(f"  [ERROR] Non-finite loss at Stage 2, Epoch {epoch}, Batch {b_idx}: {total_loss.item()}")
@@ -411,12 +505,14 @@ def run_screening_trial(
 
             probs = torch.sigmoid(logits)
             _, d_val, iou_val = calculate_binary_metrics(probs, labels)
+            sample_h = compute_sample_gating_entropy(routing_infos)
 
             train_loss += total_loss.item()
             train_seg_loss += seg_loss.item()
             train_lb_loss += lb_loss.item()
             train_dice += d_val
             train_iou += iou_val
+            train_sample_entropy += sample_h
             batches_processed += 1
 
         sched2.step(epoch)
@@ -425,6 +521,7 @@ def run_screening_trial(
         avg_train_loss = train_loss / num_b
         avg_train_dice = train_dice / num_b
         avg_train_lb = train_lb_loss / num_b
+        s2_sample_entropies.append(train_sample_entropy / num_b)
 
         # Validation evaluation (strictly Val set)
         model.eval()
@@ -443,9 +540,14 @@ def run_screening_trial(
                 )
 
         ep_duration = time.perf_counter() - t_ep_start
+        epoch_durations.append(ep_duration)
         val_dice = float(val_metrics.get('dice', 0.0))
         val_loss = float(val_metrics.get('loss', 0.0))
         val_iou = float(val_metrics.get('iou', 0.0))
+
+        stage2_final_val_dice = val_dice
+        stage2_final_val_loss = val_loss
+        stage2_final_val_iou = val_iou
 
         if val_dice > stage2_best_val_dice:
             stage2_best_val_dice = val_dice
@@ -461,12 +563,11 @@ def run_screening_trial(
 
     total_trial_sec = time.perf_counter() - start_trial_time
     routing_stats = calculate_routing_statistics(model)
+    mean_epoch_time_s = float(np.mean(epoch_durations)) if epoch_durations else 0.0
+    avg_sample_entropy = float(np.mean(s2_sample_entropies)) if s2_sample_entropies else 0.0
 
     peak_allocated_mb = torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == 'cuda' else 0.0
     peak_reserved_mb = torch.cuda.max_memory_reserved(device) / (1024**2) if device.type == 'cuda' else 0.0
-
-    overall_best_dice = max(stage1_best_val_dice, stage2_best_val_dice)
-    overall_best_loss = stage2_best_val_loss if stage2_best_val_dice >= stage1_best_val_dice else stage1_best_val_loss
 
     trial_summary = {
         "candidate_id": candidate_id,
@@ -478,16 +579,26 @@ def run_screening_trial(
         "lb_factor": lb_factor,
         "expert_dropout": expert_dropout,
         "residual_scale": residual_scale,
-        "stage1_best_val_dice": round(stage1_best_val_dice, 4),
-        "stage1_best_val_loss": round(stage1_best_val_loss, 4),
-        "stage2_best_val_dice": round(stage2_best_val_dice, 4),
-        "stage2_best_val_loss": round(stage2_best_val_loss, 4),
-        "best_val_dice": round(overall_best_dice, 4),
-        "best_val_loss": round(overall_best_loss, 4),
-        "best_val_iou": round(stage2_best_val_iou, 4),
-        "mean_routing_entropy": routing_stats['mean_entropy'],
+        # Stage 1 metrics (Final & Best)
+        "s1_final_val_dice": round(stage1_final_val_dice, 4),
+        "s1_final_val_loss": round(stage1_final_val_loss, 4),
+        "s1_best_val_dice": round(stage1_best_val_dice, 4),
+        "s1_best_val_loss": round(stage1_best_val_loss, 4),
+        # Stage 2 metrics (Final & Best)
+        "s2_final_val_dice": round(stage2_final_val_dice, 4),
+        "s2_final_val_loss": round(stage2_final_val_loss, 4),
+        "s2_final_val_iou": round(stage2_final_val_iou, 4),
+        "s2_best_val_dice": round(stage2_best_val_dice, 4),
+        "s2_best_val_loss": round(stage2_best_val_loss, 4),
+        "s2_best_val_iou": round(stage2_best_val_iou, 4),
+        # Entropy & Expert metrics
+        "expert_utilization_entropy": routing_stats['expert_utilization_entropy'],
+        "sample_routing_entropy": round(avg_sample_entropy, 4),
         "active_experts": routing_stats['active_experts'],
+        "pool_size": routing_stats['pool_size'],
         "expert_utilization_pct": routing_stats['expert_utilization_pct'],
+        # Hardware & Timing
+        "mean_epoch_time_s": round(mean_epoch_time_s, 2),
         "peak_allocated_mb": round(peak_allocated_mb, 1),
         "peak_reserved_mb": round(peak_reserved_mb, 1),
         "nan_inf_status": "FAIL" if nan_inf_detected else "CLEAN",
@@ -497,6 +608,7 @@ def run_screening_trial(
 
     # Clean up trial resources
     del model, opt1, opt2, sched1, sched2, scaler, best_stage1_weights
+    del stage1_loader, stage2_loader
     gc.collect()
     if device.type == 'cuda':
         torch.cuda.empty_cache()
@@ -596,11 +708,8 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Build Training DataLoader
+    # Prepare Datasets
     img_size = int(base_cfg.get('img_size', 448))
-    seed = int(base_cfg.get('seed', 42))
-    g = torch.Generator()
-    g.manual_seed(seed)
 
     if args.dry_run:
         print("[Notice] Running in --dry-run mode: generating mock dataset.")
@@ -613,18 +722,7 @@ def main():
         assert len(val_pairs) > 0, f"No validation pairs found in {base_cfg['root_dir']}/val!"
         loader_workers = base_cfg['num_workers']
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=base_cfg['batch_size'],
-        shuffle=True,
-        num_workers=loader_workers,
-        worker_init_fn=seed_worker,
-        generator=g,
-        pin_memory=(device.type == 'cuda'),
-        drop_last=False,
-    )
-
-    print(f"Dataset Loaded: Train = {len(train_dataset)} samples ({len(train_loader)} batches) | Val = {len(val_pairs)} pairs")
+    print(f"Dataset Loaded: Train = {len(train_dataset)} samples | Val = {len(val_pairs)} pairs")
 
     # Construct Screening Grid
     trials_to_run: List[Tuple[str, Dict[str, Any]]] = []
@@ -674,7 +772,8 @@ def main():
             candidate_id=cand_id,
             base_config=base_cfg,
             trial_params=params,
-            train_loader=train_loader,
+            train_dataset=train_dataset,
+            loader_workers=loader_workers,
             val_pairs=val_pairs,
             device=device,
             stage1_epochs=args.stage1_epochs,
@@ -685,49 +784,67 @@ def main():
         )
         results.append(res)
 
-    # Sort results by Val Dice descending
-    results.sort(key=lambda x: x['best_val_dice'], reverse=True)
+    # Sort results by Stage 2 Final Val Dice descending, then S2 Best Val Dice
+    results.sort(key=lambda x: (x['s2_final_val_dice'], x['s2_best_val_dice']), reverse=True)
 
     # Generate Markdown Summary Report
+    avg_ep_sec_all = float(np.mean([r['mean_epoch_time_s'] for r in results])) if results else 0.0
+    est_full_train_hours = (avg_ep_sec_all * 30.0) / 3600.0
+
     md_lines = [
         "# SAGE-Lite B2 Phase 1 Base Model Hyperparameter Screening Report",
+        "",
+        "> [!IMPORTANT]",
+        "> **Bản chất Thử nghiệm: Short-Horizon Screening**",
+        f"> Thử nghiệm này chạy với ngân sách ngắn hạn (Stage 1 = {args.stage1_epochs} epochs, Stage 2 = {args.stage2_epochs} epochs) nhằm phát hiện vùng siêu tham số ổn định, loại bỏ các cấu hình phân kỳ hoặc router collapse.",
+        "> Kết quả dùng để sàng lọc danh sách candidate(s) tiềm năng nhất; ứng viên được chọn cần được xác nhận bằng lượt huấn luyện đầy đủ trước khi sinh Locked Base Checkpoint chính thức.",
         "",
         f"*Execution Date: {time.strftime('%Y-%m-%d %H:%M:%S')}*",
         f"*Hardware: {dev_name} ({total_vram_gb:.2f} GB VRAM)*",
         f"*Git Commit HEAD: `{get_git_commit_hash()}`*",
         f"*ViT Depth: {base_cfg['num_transformer_layers']} | Batch Size: {base_cfg['batch_size']} | Workers: {base_cfg['num_workers']}*",
-        f"*Protocol: Two-Stage Base (p3_mode=None, Stage 1={args.stage1_epochs} ep, Stage 2={args.stage2_epochs} ep)*",
+        f"*DataLoader Isolation: Fresh Generator(seed=42) per trial per stage (100% batch-order reproducibility)*",
+        f"*Objective Scaling: Total Loss = Seg_Loss + 1.0 * LB_Loss (SageRouter internal factor applied)*",
         f"*Evaluation: Strictly Crack500 Val Split ({len(val_pairs)} pairs). Test split unaccessed.*",
         "",
         "---",
         "",
-        "## 1. Bảng Xếp Hạng Kết Quả Thử Nghiệm (Leaderboard by Val Dice)",
+        "## 1. Bảng Xếp Hạng Kết Quả Thử Nghiệm (Leaderboard by S2 Final Val Dice)",
         "",
-        "| Rank | Candidate | Base LR | Stage2 LR (Sh/Base) | Top-K | Router Dim | Best Val Dice | Best Val IoU | Val Loss | Mean Entropy | Active Experts | Peak Alloc (MB) | Peak Reserv (MB) | Stability |",
-        "|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
+        "| Rank | Candidate | Base LR | S1 Final (Best) Dice | S2 Final (Best) Dice | S2 Final (Best) IoU | S2 Final Loss | Utilization Entropy | Sample Routing Entropy | Active Experts | Measured Time / Ep | Peak VRAM (Alloc / Res) | Stability |",
+        "|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
     ]
 
     for rank, r in enumerate(results, 1):
-        sh_lr = r['stage2_shared_lr']
-        b_lr = r['stage2_base_lr']
-        lr_ratio_str = f"{sh_lr:.1e}/{b_lr:.1e}"
+        s1_dice_str = f"{r['s1_final_val_dice']:.4f} ({r['s1_best_val_dice']:.4f})"
+        s2_dice_str = f"**{r['s2_final_val_dice']:.4f}** ({r['s2_best_val_dice']:.4f})"
+        s2_iou_str = f"{r['s2_final_val_iou']:.4f} ({r['s2_best_val_iou']:.4f})"
+        vram_str = f"{r['peak_allocated_mb']:.0f} / {r['peak_reserved_mb']:.0f} MB"
+        time_str = f"{r['mean_epoch_time_s']:.1f}s"
+        experts_str = f"{r['active_experts']}/{r.get('pool_size', 16)} ({r['expert_utilization_pct']}%)"
+
         md_lines.append(
-            f"| **{rank}** | `{r['candidate_id']}` | {r['lr']:.2e} | {lr_ratio_str} | "
-            f"{r['top_k']} | {r['router_hidden_dim']} | **{r['best_val_dice']:.4f}** | {r['best_val_iou']:.4f} | "
-            f"{r['best_val_loss']:.4f} | {r['mean_routing_entropy']:.2f} | {r['active_experts']}/16 ({r['expert_utilization_pct']}%) | "
-            f"{r['peak_allocated_mb']} | {r['peak_reserved_mb']} | **{r['nan_inf_status']}** |"
+            f"| **{rank}** | `{r['candidate_id']}` | {r['lr']:.2e} | {s1_dice_str} | {s2_dice_str} | {s2_iou_str} | "
+            f"{r['s2_final_val_loss']:.4f} | {r['expert_utilization_entropy']:.2f} bits | {r['sample_routing_entropy']:.2f} bits | "
+            f"{experts_str} | {time_str} | {vram_str} | **{r['nan_inf_status']}** |"
         )
 
     md_lines.extend([
         "",
         "---",
         "",
-        "## 2. Nhận Xét Khoa Học & Quyết Định Kế Tiếp",
+        "## 2. Nhận Xét Khoa Học & Phân Tích Kỹ Thuật",
         "",
-        f"1. **Ứng viên Dẫn đầu (Top Pick):** `{results[0]['candidate_id']}` đạt **Val Dice = {results[0]['best_val_dice']:.4f}** và **Val IoU = {results[0]['best_val_iou']:.4f}**.",
-        f"2. **Độ ổn định số học:** Toàn bộ các thử nghiệm đều đạt trạng thái `{results[0]['nan_inf_status']}` (không phát sinh NaN/Inf).",
-        f"3. **Tài nguyên VRAM ở BS14:** Peak Allocated cao nhất đạt `{max(r['peak_allocated_mb'] for r in results):.1f} MB` và Peak Reserved đạt `{max(r['peak_reserved_mb'] for r in results):.1f} MB`.",
-        "4. **Bước tiếp theo:** Khóa siêu tham số tối ưu đã chọn vào config chính thức trước khi chuyển sang bước khảo sát kế tiếp trong lộ trình Phase 1.",
+        f"1. **Ứng viên Dẫn đầu (Top Pick):** `{results[0]['candidate_id']}` đạt **S2 Final Val Dice = {results[0]['s2_final_val_dice']:.4f}** (Best: {results[0]['s2_best_val_dice']:.4f}) và **S2 Final IoU = {results[0]['s2_final_val_iou']:.4f}**.",
+        f"2. **Độ ổn định số học (Numerical Stability):** Trạng thái NaN/Inf toàn bộ candidate: `{results[0]['nan_inf_status']}`.",
+        f"3. **Expert Utilization Entropy ($H_{{usage}}$) vs Sample Routing Entropy ($H_{{routing}}$):**",
+        f"   - $H_{{usage}}$ trung bình: `{results[0]['expert_utilization_entropy']:.2f}` bits / 4.0 bits tối đa (thể hiện mức độ dàn trải việc chọn chuyên gia trên toàn bộ pool experts).",
+        f"   - $H_{{routing}}$ trung bình: `{results[0]['sample_routing_entropy']:.2f}` bits / 2.0 bits tối đa cho top-4 (thể hiện phân phối trọng số gating giữa 4 chuyên gia được chọn cho từng mẫu).",
+        f"   - Số lượng chuyên gia hoạt động: `{results[0]['active_experts']}/{results[0].get('pool_size', 16)}` ({results[0]['expert_utilization_pct']}%).",
+        f"4. **Đo lường Tốc độ Thực tế (Empirical Timing):**",
+        f"   - Thời gian thực tế đo được trên môi trường: **{avg_ep_sec_all:.1f} giây / epoch** ({avg_ep_sec_all / 60.0:.2f} phút / epoch).",
+        f"   - Ước tính ngân sách chạy full training 30 epoch (12 Stage 1 + 18 Stage 2): **xấp xỉ {est_full_train_hours:.2f} giờ**.",
+        "5. **Bước tiếp theo trong Lộ trình:** Khóa siêu tham số tiềm năng nhất và tiến hành xác nhận trước khi chuyển sang Step 2 (`top_k` screening).",
         "",
     ])
 
@@ -749,7 +866,7 @@ def main():
     print(f"Summary Report: {report_path}")
     print(f"Summary CSV:    {csv_path}")
     try:
-        print("\n" + "\n".join(md_lines[10:20]))
+        print("\n" + "\n".join(md_lines[15:25]))
     except UnicodeEncodeError:
         # Fallback for environments with strict non-utf-8 console encoding
         print(f"\nReport generated with {len(results)} candidate results.")
