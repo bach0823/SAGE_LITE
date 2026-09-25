@@ -215,7 +215,7 @@ def run_single_preflight(
     ).to(device)
     model.train() # Exploration noise and expert dropout active
 
-    # Ingest locked-base checkpoint strictly if configured
+    # P3-C standalone protocol: locked-base is optional legacy functionality; no parent is required.
     locked_base_path = resolve_locked_base_path(cfg, locked_base_override=locked_base_override)
     locked_base_provenance = "NOT_PROVEN"
     locked_base_ingested = False
