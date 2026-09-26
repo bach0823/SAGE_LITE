@@ -342,6 +342,7 @@ def main(args):
     # Ingest locked-base checkpoint or pre-trained checkpoint if provided
     locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
     generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
+    is_stage2_resume = getattr(args, 'resume_stage2', False) or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
 
     # Standalone vs Locked-Base Invariant Handling
     if locked_base_path:
@@ -368,9 +369,13 @@ def main(args):
     # Initialize gamma parameters for P3
     gamma_init_val = float(config.get('gamma_init', 0.01))
     if p3_mode is not None:
-        set_p3_gamma_init(model, gamma_init_val)
-        g0, g1 = get_p3_gamma_values(model)
-        logger.info(f"P3 Refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
+        if is_stage2_resume and generic_ckpt_path:
+            g0, g1 = get_p3_gamma_values(model)
+            logger.info(f"P3 Refinement gamma preserved from checkpoint: S0={g0:.4f}, S1={g1:.4f}")
+        else:
+            set_p3_gamma_init(model, gamma_init_val)
+            g0, g1 = get_p3_gamma_values(model)
+            logger.info(f"P3 Refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
 
     criterion = CrackBinaryLoss()
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
@@ -544,6 +549,9 @@ def main(args):
             f"Stage 2 Extension baseline initialized from {resume_ckpt_path}: "
             f"Best Val Dice={global_best_dice:.4f}, Best Val Loss={global_best_loss:.4f} (recorded at original Epoch {ckpt_epoch})"
         )
+        if p3_mode is not None:
+            g0, g1 = get_p3_gamma_values(model)
+            logger.info(f"Stage 2 Extension learned gamma confirmed: S0={g0:.4f}, S1={g1:.4f}")
     elif args.stage2_only:
         stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
         if os.path.exists(stage1_ckpt_path):
