@@ -25,6 +25,7 @@ import os
 import sys
 import time
 from typing import Any, Dict, List, Tuple
+import yaml
 
 import cv2
 import matplotlib.pyplot as plt
@@ -375,8 +376,18 @@ def main():
     if device.type == "cuda":
         torch.backends.cudnn.enabled = False  # stability on GTX 1650/1660
 
-    print("Initializing B2 UNet (D12, P3-C, img_size 448)...")
-    model = create_b2_unet(num_transformer_layers=12, p3_mode="C", img_size=448).to(device)
+    # Load config to dynamically configure depth and p3_mode
+    model_cfg = {}
+    if os.path.exists(args.config):
+        with open(args.config, "r", encoding="utf-8") as f:
+            model_cfg = yaml.safe_load(f) or {}
+
+    num_layers = int(model_cfg.get("num_transformer_layers", 12))
+    p3_mode = model_cfg.get("p3_mode", "C")
+    img_size = int(model_cfg.get("img_size", 448))
+
+    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size})...")
+    model = create_b2_unet(num_transformer_layers=num_layers, p3_mode=p3_mode, img_size=img_size).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
