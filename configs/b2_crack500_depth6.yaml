@@ -4,7 +4,8 @@ seed: 42
 img_size: 448
 batch_size: 12
 num_workers: 4
-epochs: 30
+epochs: 35
+stage1_epochs: 17
 patience: 6
 two_stage: true
 lr: 1e-4
