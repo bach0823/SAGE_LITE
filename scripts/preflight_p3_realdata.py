@@ -70,6 +70,7 @@ from scripts.evaluate_crack_official import get_image_mask_pairs, evaluate_split
 
 
 EXPECTED_LOCKED_BASE_SHA256_D4 = "5b928ec29fcaadc78acc0bbe97815fe0617f9efe45cbb8466671339a15d6c05c"
+EXPECTED_LOCKED_BASE_SHA256 = EXPECTED_LOCKED_BASE_SHA256_D4
 
 
 class SyntheticDataset(torch.utils.data.Dataset):

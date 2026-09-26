@@ -266,6 +266,14 @@ def main(args):
         config['warmup_epochs'] = args.warmup_epochs
     if getattr(args, 'output_dir', None) is not None:
         config['output_dir'] = args.output_dir
+    if getattr(args, 'stage2_base_lr', None) is not None:
+        config['stage2_base_lr'] = args.stage2_base_lr
+    if getattr(args, 'stage2_shared_lr', None) is not None:
+        config['stage2_shared_lr'] = args.stage2_shared_lr
+    if getattr(args, 'stage2_p3_lr', None) is not None:
+        config['stage2_p3_lr'] = args.stage2_p3_lr
+    if getattr(args, 'patience', None) is not None:
+        config['patience'] = args.patience
 
     set_seed(config.get('seed', 42))
 
@@ -518,9 +526,25 @@ def main(args):
     global_best_loss = float('inf')
     
     epochs_used_so_far = 0
-    stages_to_run = [2] if args.stage2_only else [1, 2]
+    is_stage2_resume = getattr(args, 'resume_stage2', False) or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
+    stages_to_run = [2] if (args.stage2_only or is_stage2_resume) else [1, 2]
     
-    if args.stage2_only:
+    if is_stage2_resume:
+        resume_ckpt_path = args.checkpoint
+        if not resume_ckpt_path or not os.path.exists(resume_ckpt_path):
+            logger.error(f"Cannot find checkpoint for Stage 2 resumption/extension: {resume_ckpt_path}")
+            sys.exit(1)
+        logger.info(f"Loading Stage 2 checkpoint for continuation: {resume_ckpt_path}")
+        resume_data = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(resume_data.get('model_state_dict', resume_data))
+        global_best_dice = float(resume_data.get('best_dice', 0.0))
+        global_best_loss = float(resume_data.get('best_loss', float('inf')))
+        ckpt_epoch = resume_data.get('epoch', 'unknown')
+        logger.info(
+            f"Stage 2 Extension baseline initialized from {resume_ckpt_path}: "
+            f"Best Val Dice={global_best_dice:.4f}, Best Val Loss={global_best_loss:.4f} (recorded at original Epoch {ckpt_epoch})"
+        )
+    elif args.stage2_only:
         stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
         if os.path.exists(stage1_ckpt_path):
             logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
@@ -546,6 +570,8 @@ def main(args):
         
         if stage == 1:
             max_stage_epochs = stage1_max
+        elif is_stage2_resume and getattr(args, 'stage2_epochs', None) is not None:
+            max_stage_epochs = args.stage2_epochs
         else:
             max_stage_epochs = total_budget - epochs_used_so_far
             if max_stage_epochs <= 0:
@@ -553,13 +579,14 @@ def main(args):
                 break
                 
         if stage == 2:
-            stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
-            if os.path.exists(stage1_ckpt_path):
-                logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
-                checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-                model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
+            if not is_stage2_resume:
+                stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
+                if os.path.exists(stage1_ckpt_path):
+                    logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
+                    checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
 
             shared_indices = config.get("sage_config", {}).get("shared_expert_indices") or config.get("sage", {}).get("shared_expert_indices", [0, 1, 2, 3])
 
@@ -583,9 +610,18 @@ def main(args):
 
         scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=warmup_epochs)
         
-        best_stage_dice = 0.0
-        best_stage_loss = float('inf')
-        epochs_no_improve = 0
+        if is_stage2_resume and stage == 2:
+            best_stage_dice = global_best_dice
+            best_stage_loss = global_best_loss
+            epochs_no_improve = int(getattr(args, 'initial_epochs_no_improve', 0) or 0)
+            logger.info(
+                f"Stage 2 Extension starting with baseline Dice={best_stage_dice:.4f}, "
+                f"Loss={best_stage_loss:.4f}, initial epochs_no_improve={epochs_no_improve}/{patience}"
+            )
+        else:
+            best_stage_dice = 0.0
+            best_stage_loss = float('inf')
+            epochs_no_improve = 0
         actual_epochs_this_stage = 0
         
         for epoch in range(1, max_stage_epochs + 1):
@@ -755,6 +791,13 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=None, help='Override total training epochs')
     parser.add_argument('--warmup-epochs', type=int, default=None, help='Override scheduler warmup epochs')
     parser.add_argument('--output-dir', type=str, default=None, help='Override output directory')
+    parser.add_argument('--resume-stage2', action='store_true', help='Resume/extend Stage 2 training from an existing Stage 2 or global checkpoint')
+    parser.add_argument('--stage2-epochs', type=int, default=None, help='Number of epochs to run Stage 2 during this continuation session')
+    parser.add_argument('--initial-epochs-no-improve', type=int, default=0, help='Initial epochs without improvement counter for early stopping (e.g. 2 if resuming after 2 non-improving epochs)')
+    parser.add_argument('--stage2-base-lr', type=float, default=None, help='Override stage2_base_lr')
+    parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
+    parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
+    parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
     args = parser.parse_args()
     main(args)
 
