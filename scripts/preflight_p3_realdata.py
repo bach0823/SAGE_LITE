@@ -113,16 +113,7 @@ def compute_preflight_verdict(all_passed: bool, results: list) -> str:
 
     for r in results:
         mode = r.get("p3_mode")
-        if mode in ("A", "B"):
-            if not r.get("locked_base_ingested", False):
-                return (
-                    "REAL-DATA P3 LAUNCH PREFLIGHT = GATED "
-                    "(Locked Base Checkpoint required for Run A/B; please supply --locked-base)"
-                )
-        elif mode == "C":
-            # P3-C is standalone by protocol; no parent checkpoint required.
-            continue
-        else:
+        if mode not in ("A", "B", "C"):
             return f"REAL-DATA P3 LAUNCH PREFLIGHT = BLOCKED (Unknown P3 mode: {mode})"
 
     return "REAL-DATA P3 LAUNCH PREFLIGHT = PASS"
@@ -237,16 +228,13 @@ def run_single_preflight(
 
     # P3-C standalone protocol: locked-base is not applicable; no parent checkpoint is ingested.
     locked_base_path = resolve_locked_base_path(cfg, locked_base_override=locked_base_override)
-    locked_base_provenance = "NOT_APPLICABLE (Standalone P3-C)" if p3_mode == "C" else "NOT_PROVEN"
+    locked_base_provenance = f"NOT_APPLICABLE (Standalone P3-{p3_mode})" if not locked_base_path else "NOT_PROVEN"
     locked_base_ingested = False
     ckpt_sha256 = None
     ckpt_basename = None
 
-    if p3_mode == "C":
-        if locked_base_path:
-            print(f"  [Notice] Run C (P3-C ASDW) is a Standalone Base Model. Parent checkpoint '{locked_base_path}' is ignored (not ingested).")
-        else:
-            print("  Run C (P3-C ASDW) is Standalone: ImageNet-pretrained initialization, no parent checkpoint required.")
+    if not locked_base_path:
+        print(f"  Run {p3_mode} (P3-{p3_mode} {p3_title}) is Standalone: ImageNet-pretrained initialization, no parent checkpoint required.")
     elif locked_base_path:
         if not os.path.exists(locked_base_path):
             raise FileNotFoundError(f"Locked base checkpoint not found at: {locked_base_path}")

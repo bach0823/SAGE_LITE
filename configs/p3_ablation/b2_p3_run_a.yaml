@@ -1,27 +1,31 @@
 # ==============================================================================
 # SAGE-Lite B2 Proposal 3 (P3) Ablation Study — Run A Configuration
 # ==============================================================================
-# Role: Run A — Compression Control under Common Fixed PE28 Treatment
+# Role: Run A — Identity / Compression Control under Common Fixed PE28 Treatment
 # Architecture: no refinement + common fixed PE28 + AdaptiveAvgPool2d(28, 28) -> ViT
-# Refinement Params: 0 (Refinement module is NOT instantiated / None)
+# Refinement Params: 0 (nn.Identity)
 # Backbone Buffer: backbone.pe28_fixed (shape [1, 784, 192], float32)
-# Locked Base Invariant: Depth = 4, Seed = 42, Batch Size = 12, Epochs = 30
+# Canonical P3-A Standalone Full Confirmation Configuration (D12, BS14, Identity)
+# Parity: 100% matched with Run C Canonical except p3_mode="A" and output_dir
 # ==============================================================================
 
 model: B2
-num_transformer_layers: 4
+num_transformer_layers: 12
 p3_mode: "A"
 seed: 42
 img_size: 448
-batch_size: 12
-num_workers: 4
+batch_size: 14
+num_workers: 2
 epochs: 30
+warmup_epochs: 3
 patience: 6
 two_stage: true
 lr: 1e-4
+p3_lr: 1e-4
+gamma_init: 0.01
 stage2_base_lr: 1e-4
 stage2_shared_lr: 1e-4
-output_dir: "/content/drive/MyDrive/crack_seg/B2_P3_RunA_Depth4"
+output_dir: "/content/drive/MyDrive/crack_seg/P3_A_Canonical_Base_D12"
 mask_suffix: ""
 smart_filter: true
 crop_mode: "random"

@@ -1,12 +1,12 @@
 # ==============================================================================
-# SAGE-Lite B2 Proposal 3 (P3) Ablation Study — Run B Configuration
+# SAGE-Lite B2 Proposal 3 (P3) Phase 1 Screening — Run B Configuration
 # ==============================================================================
 # Role: Run B — Generic Isotropic Refinement (Near-Matched-Capacity Control)
 # Architecture: 3x DWConv(3x3) -> Concat(3C) -> GELU -> PWConv(3C->C) -> Residual(gamma) -> AdaptiveAvgPool2d(28, 28) -> ViT
 # Refinement Params: 38,450 total (S0: 8,209, S1: 30,241)
 # Backbone Buffer: backbone.pe28_fixed (shape [1, 784, 192], float32)
-# Canonical P3-B Standalone Full Confirmation Configuration (D12, BS14, Generic DW)
-# Parity: 100% matched with Run C Canonical except p3_mode="B" and output_dir
+# Protocol: Standalone ImageNet-pretrained, D12, BS14, 10 epochs (5 S1 + 5 S2)
+# Parity: 100% matched with Run C except p3_mode="B" and output_dir
 # ==============================================================================
 
 model: B2
@@ -16,8 +16,8 @@ seed: 42
 img_size: 448
 batch_size: 14
 num_workers: 2
-epochs: 30
-warmup_epochs: 3
+epochs: 10
+warmup_epochs: 1
 patience: 6
 two_stage: true
 lr: 1e-4
@@ -25,7 +25,7 @@ p3_lr: 1e-4
 gamma_init: 0.01
 stage2_base_lr: 1e-4
 stage2_shared_lr: 1e-4
-output_dir: "/content/drive/MyDrive/crack_seg/P3_B_Canonical_Base_D12"
+output_dir: "/content/drive/MyDrive/crack_seg/Phase1_Screening/P3_B_D12"
 mask_suffix: ""
 smart_filter: true
 crop_mode: "random"
