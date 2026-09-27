@@ -330,6 +330,37 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    # Load config first to dynamically configure paths, depth, and p3_mode
+    model_cfg = {}
+    if os.path.exists(args.config):
+        with open(args.config, "r", encoding="utf-8") as f:
+            model_cfg = yaml.safe_load(f) or {}
+
+    # Auto-resolve routing_json if specified/default path does not exist
+    if not os.path.exists(args.routing_json):
+        candidate_sibling = os.path.join(os.path.dirname(args.output_dir), "full_val", "routing_statistics.json")
+        if os.path.exists(candidate_sibling):
+            print(f"[Auto-Resolve] Detected sibling routing JSON: {candidate_sibling}")
+            args.routing_json = candidate_sibling
+        elif model_cfg.get("output_dir"):
+            candidate_cfg = os.path.join(model_cfg["output_dir"], "P3_C_Routing_Diagnostics", "full_val", "routing_statistics.json")
+            if os.path.exists(candidate_cfg):
+                print(f"[Auto-Resolve] Detected config output_dir routing JSON: {candidate_cfg}")
+                args.routing_json = candidate_cfg
+
+    # Auto-resolve data_root if default path does not exist
+    if not os.path.exists(args.data_root):
+        if model_cfg.get("root_dir") and os.path.exists(model_cfg["root_dir"]):
+            print(f"[Auto-Resolve] Detected config root_dir: {model_cfg['root_dir']}")
+            args.data_root = model_cfg["root_dir"]
+
+    # Auto-resolve checkpoint if default path does not exist
+    if not os.path.exists(args.checkpoint) and model_cfg.get("output_dir"):
+        candidate_ckpt = os.path.join(model_cfg["output_dir"], "best_model_b2_global.pth")
+        if os.path.exists(candidate_ckpt):
+            print(f"[Auto-Resolve] Detected config output_dir checkpoint: {candidate_ckpt}")
+            args.checkpoint = candidate_ckpt
+
     os.makedirs(args.output_dir, exist_ok=True)
     figures_dir = os.path.join(args.output_dir, "figures")
     qualitative_dir = os.path.join(args.output_dir, "qualitative")
