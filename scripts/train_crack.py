@@ -523,9 +523,9 @@ def main(args):
         return
 
     # ── Legacy Two-Stage Training (Only when --two-stage is requested) ────────
-    total_budget = config.get('epochs', 30)
-    stage1_max = min(config.get('stage1_epochs', total_budget // 2), total_budget)
-    patience = config.get('patience', 6)
+    total_budget = getattr(args, 'epochs', None) or config.get('epochs', 30)
+    stage1_max = getattr(args, 'stage1_epochs', None) or min(config.get('stage1_epochs', total_budget // 2), total_budget)
+    patience = getattr(args, 'patience', None) or config.get('patience', 6)
     
     global_best_dice = 0.0
     global_best_loss = float('inf')
@@ -578,7 +578,7 @@ def main(args):
         
         if stage == 1:
             max_stage_epochs = stage1_max
-        elif is_stage2_resume and getattr(args, 'stage2_epochs', None) is not None:
+        elif getattr(args, 'stage2_epochs', None) is not None:
             max_stage_epochs = args.stage2_epochs
         else:
             max_stage_epochs = total_budget - epochs_used_so_far
@@ -800,7 +800,8 @@ if __name__ == '__main__':
     parser.add_argument('--warmup-epochs', type=int, default=None, help='Override scheduler warmup epochs')
     parser.add_argument('--output-dir', type=str, default=None, help='Override output directory')
     parser.add_argument('--resume-stage2', action='store_true', help='Resume/extend Stage 2 training from an existing Stage 2 or global checkpoint')
-    parser.add_argument('--stage2-epochs', type=int, default=None, help='Number of epochs to run Stage 2 during this continuation session')
+    parser.add_argument('--stage1-epochs', type=int, default=None, help='Number of epochs to run Stage 1 in two-stage training')
+    parser.add_argument('--stage2-epochs', type=int, default=None, help='Number of epochs to run Stage 2 in two-stage training')
     parser.add_argument('--initial-epochs-no-improve', type=int, default=0, help='Initial epochs without improvement counter for early stopping (e.g. 2 if resuming after 2 non-improving epochs)')
     parser.add_argument('--stage2-base-lr', type=float, default=None, help='Override stage2_base_lr')
     parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
