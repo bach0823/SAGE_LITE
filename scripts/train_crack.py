@@ -199,6 +199,23 @@ def get_scheduler(optimizer, epochs, warmup_epochs=3):
         t_in_epochs=True
     )
 
+class ConstantLRScheduler:
+    """Minimal constant LR scheduler matching the timm scheduler step interface (no warmup, constant LR floor)."""
+    def __init__(self, optimizer: optim.Optimizer, lr: float = 1e-6):
+        self.optimizer = optimizer
+        self.lr = float(lr)
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.lr
+
+    def step(self, epoch: Optional[int] = None):
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.lr
+
+    def step_update(self, num_updates: int, metric: Optional[float] = None):
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.lr
+
+
 class CrackBinaryLoss(torch.nn.Module):
     def __init__(self, bce_weight=1.0, dice_weight=1.5, smooth=1e-5):
         super().__init__()
@@ -342,7 +359,11 @@ def main(args):
     # Ingest locked-base checkpoint or pre-trained checkpoint if provided
     locked_base_path = getattr(args, 'locked_base', None) or config.get('locked_base_checkpoint')
     generic_ckpt_path = getattr(args, 'checkpoint', None) or config.get('checkpoint')
-    is_stage2_resume = getattr(args, 'resume_stage2', False) or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
+    is_stage2_resume = (
+        getattr(args, 'resume_stage2', False)
+        or getattr(args, 'resume_stage2_low_lr', False)
+        or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
+    )
 
     # Standalone vs Locked-Base Invariant Handling
     if locked_base_path:
@@ -387,7 +408,12 @@ def main(args):
     lr_decoder = base_lr
     lr_sage = base_lr
 
-    two_stage = getattr(args, 'two_stage', False) or config.get('two_stage', False)
+    two_stage = (
+        getattr(args, 'two_stage', False)
+        or config.get('two_stage', False)
+        or getattr(args, 'resume_stage2', False)
+        or getattr(args, 'resume_stage2_low_lr', False)
+    )
 
     if not two_stage:
         logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
@@ -531,7 +557,12 @@ def main(args):
     global_best_loss = float('inf')
     
     epochs_used_so_far = 0
-    is_stage2_resume = getattr(args, 'resume_stage2', False) or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
+    is_stage2_resume = (
+        getattr(args, 'resume_stage2', False)
+        or getattr(args, 'resume_stage2_low_lr', False)
+        or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
+    )
+    is_low_lr = getattr(args, 'resume_stage2_low_lr', False)
     stages_to_run = [2] if (args.stage2_only or is_stage2_resume) else [1, 2]
     
     if is_stage2_resume:
@@ -545,9 +576,31 @@ def main(args):
         global_best_dice = float(resume_data.get('best_dice', 0.0))
         global_best_loss = float(resume_data.get('best_loss', float('inf')))
         ckpt_epoch = resume_data.get('epoch', 'unknown')
+
+        # Baseline resolution: check adjacent best_model checkpoint if not present in resume_data
+        if global_best_dice == 0.0 and getattr(args, 'best_dice', None) is None:
+            dirname = os.path.dirname(resume_ckpt_path)
+            candidate_best = os.path.join(dirname, f"best_model_{model_type.lower()}_stage2.pth")
+            if not os.path.exists(candidate_best):
+                candidate_best = os.path.join(dirname, f"best_model_{model_type.lower()}_global.pth")
+            if os.path.exists(candidate_best):
+                try:
+                    best_meta = torch.load(candidate_best, map_location='cpu', weights_only=False)
+                    global_best_dice = float(best_meta.get('best_dice', 0.0))
+                    global_best_loss = float(best_meta.get('best_loss', float('inf')))
+                    logger.info(f"Loaded baseline best metrics from adjacent checkpoint {candidate_best}: Dice={global_best_dice:.4f}, Loss={global_best_loss:.4f}")
+                except Exception as e:
+                    logger.warning(f"Could not load metadata from {candidate_best}: {e}")
+
+        # Explicit CLI overrides take top precedence
+        if getattr(args, 'best_dice', None) is not None:
+            global_best_dice = float(args.best_dice)
+        if getattr(args, 'best_loss', None) is not None:
+            global_best_loss = float(args.best_loss)
+
         logger.info(
-            f"Stage 2 Extension baseline initialized from {resume_ckpt_path}: "
-            f"Best Val Dice={global_best_dice:.4f}, Best Val Loss={global_best_loss:.4f} (recorded at original Epoch {ckpt_epoch})"
+            f"Stage 2 Extension baseline initialized: "
+            f"Best Val Dice={global_best_dice:.4f}, Best Val Loss={global_best_loss:.4f} (source: {resume_ckpt_path})"
         )
         if p3_mode is not None:
             g0, g1 = get_p3_gamma_values(model)
@@ -602,9 +655,17 @@ def main(args):
                 model.set_shared_experts(shared_indices)
                 logger.info(f"Stage 2: Updated shared expert indices to {shared_indices}")
 
-            stage2_base_lr = float(config.get("stage2_base_lr", base_lr))
-            stage2_shared_lr = float(config.get("stage2_shared_lr", base_lr))
-            stage2_p3_lr = float(config.get("stage2_p3_lr", p3_lr))
+            if is_low_lr:
+                target_lr = float(getattr(args, 'low_lr', None) or getattr(args, 'stage2_base_lr', None) or 1e-6)
+                stage2_base_lr = target_lr
+                stage2_shared_lr = target_lr
+                stage2_p3_lr = target_lr
+                logger.info(f"Stage 2 Low-LR Extension: keeping constant LR floor={target_lr:.2e} across all groups")
+            else:
+                stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
+                stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
+                stage2_p3_lr = float(getattr(args, 'stage2_p3_lr', None) or config.get("stage2_p3_lr", p3_lr))
+
             logger.info(f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e}")
             optimizer = create_stage2_optimizer(
                 model,
@@ -616,7 +677,11 @@ def main(args):
             param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
             optimizer = optim.AdamW(param_groups)
 
-        scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=warmup_epochs)
+        if is_low_lr and stage == 2:
+            scheduler = ConstantLRScheduler(optimizer, lr=target_lr)
+            logger.info(f"Stage 2 Scheduler: Constant LR {target_lr:.2e} (warmup_epochs=0, no decay)")
+        else:
+            scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=warmup_epochs)
         
         if is_stage2_resume and stage == 2:
             best_stage_dice = global_best_dice
@@ -769,6 +834,25 @@ def main(args):
             else:
                 epochs_no_improve += 1
                 
+            last_stage_ckpt_path = os.path.join(output_dir, f"last_model_{model_type.lower()}_stage{stage}.pth")
+            last_stage_ckpt_data = {
+                'epoch': int(epoch),
+                'stage': int(stage),
+                'model_state_dict': model.state_dict(),
+                'val_dice': float(val_dice),
+                'val_loss': float(val_loss),
+                'best_dice': float(best_stage_dice),
+                'best_loss': float(best_stage_loss),
+                'model_type': model_type,
+            }
+            if model_type in ['B1', 'B2']:
+                last_stage_ckpt_data['num_transformer_layers'] = vit_depth
+            if model_type == 'B2':
+                last_stage_ckpt_data['sage_config'] = sage_cfg
+                if p3_mode is not None:
+                    last_stage_ckpt_data['p3_mode'] = p3_mode
+            torch.save(last_stage_ckpt_data, last_stage_ckpt_path)
+                
             if epochs_no_improve >= patience:
                 logger.info(f"EarlyStopping triggered at epoch {epoch} (Patience: {patience})")
                 break
@@ -800,6 +884,10 @@ if __name__ == '__main__':
     parser.add_argument('--warmup-epochs', type=int, default=None, help='Override scheduler warmup epochs')
     parser.add_argument('--output-dir', type=str, default=None, help='Override output directory')
     parser.add_argument('--resume-stage2', action='store_true', help='Resume/extend Stage 2 training from an existing Stage 2 or global checkpoint')
+    parser.add_argument('--resume-stage2-low-lr', action='store_true', help='Resume Stage 2 training at constant LR floor (1e-6) without warmup or cosine restart')
+    parser.add_argument('--low-lr', type=float, default=1e-6, help='Learning rate floor to maintain when --resume-stage2-low-lr is enabled (default: 1e-6)')
+    parser.add_argument('--best-dice', type=float, default=None, help='Explicit baseline best validation Dice score for continuation (e.g. 0.7599)')
+    parser.add_argument('--best-loss', type=float, default=None, help='Explicit baseline best validation Loss score for continuation (e.g. 0.9602)')
     parser.add_argument('--stage1-epochs', type=int, default=None, help='Number of epochs to run Stage 1 in two-stage training')
     parser.add_argument('--stage2-epochs', type=int, default=None, help='Number of epochs to run Stage 2 in two-stage training')
     parser.add_argument('--initial-epochs-no-improve', type=int, default=0, help='Initial epochs without improvement counter for early stopping (e.g. 2 if resuming after 2 non-improving epochs)')
