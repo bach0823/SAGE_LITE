@@ -469,6 +469,12 @@ def main(args):
                 np.random.set_state(ckpt_data['numpy_rng_state'])
             if ckpt_data.get('python_rng_state') is not None:
                 random.setstate(ckpt_data['python_rng_state'])
+            if 'dataloader_generator_state' in ckpt_data and ckpt_data['dataloader_generator_state'] is not None:
+                try:
+                    g.set_state(ckpt_data['dataloader_generator_state'])
+                    logger.info("Restored DataLoader generator state from checkpoint.")
+                except Exception as e:
+                    logger.warning(f"Could not restore DataLoader generator state: {e}")
             best_dice = float(ckpt_data.get('best_dice', 0.0))
             best_loss = float(ckpt_data.get('best_loss', float('inf')))
             epochs_no_improve = int(ckpt_data.get('epochs_no_improve', 0))
@@ -588,6 +594,7 @@ def main(args):
                 'cuda_rng_state_all': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 'numpy_rng_state': np.random.get_state(),
                 'python_rng_state': random.getstate(),
+                'dataloader_generator_state': g.get_state(),
                 'model_type': model_type,
             }
             if model_type in ['B1', 'B2']:
@@ -772,6 +779,12 @@ def main(args):
                 np.random.set_state(resume_data['numpy_rng_state'])
             if resume_data.get('python_rng_state') is not None:
                 random.setstate(resume_data['python_rng_state'])
+            if 'dataloader_generator_state' in resume_data and resume_data['dataloader_generator_state'] is not None:
+                try:
+                    g.set_state(resume_data['dataloader_generator_state'])
+                    logger.info("Restored DataLoader generator state from checkpoint.")
+                except Exception as e:
+                    logger.warning(f"Could not restore DataLoader generator state: {e}")
 
         if is_stage2_resume and stage == 2:
             best_stage_dice = global_best_dice
@@ -956,6 +969,7 @@ def main(args):
                 'cuda_rng_state_all': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 'numpy_rng_state': np.random.get_state(),
                 'python_rng_state': random.getstate(),
+                'dataloader_generator_state': g.get_state(),
                 'model_type': model_type,
             }
             if model_type in ['B1', 'B2']:
