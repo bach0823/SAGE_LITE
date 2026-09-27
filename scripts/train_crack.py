@@ -2,6 +2,8 @@ import json
 import argparse
 import os
 import sys
+import random
+import numpy as np
 import yaml
 from tqdm import tqdm
 from typing import Optional, Set, Tuple
@@ -212,6 +214,15 @@ class ConstantLRScheduler:
             g['lr'] = self.lr
 
     def step_update(self, num_updates: int, metric: Optional[float] = None):
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.lr
+
+    def state_dict(self):
+        return {'lr': self.lr}
+
+    def load_state_dict(self, state_dict):
+        if 'lr' in state_dict:
+            self.lr = float(state_dict['lr'])
         for g in self.optimizer.param_groups:
             g['lr'] = self.lr
 
@@ -428,8 +439,44 @@ def main(args):
         best_dice = 0.0
         best_loss = float('inf')
         epochs_no_improve = 0
+        start_epoch = 0
 
-        for epoch in range(1, total_epochs + 1):
+        if generic_ckpt_path and os.path.exists(generic_ckpt_path):
+            ckpt_data = torch.load(generic_ckpt_path, map_location=device, weights_only=False)
+            if 'optimizer_state_dict' in ckpt_data:
+                try:
+                    optimizer.load_state_dict(ckpt_data['optimizer_state_dict'])
+                    logger.info("Restored optimizer state_dict from checkpoint.")
+                except Exception as e:
+                    logger.warning(f"Could not restore optimizer: {e}")
+            if 'scheduler_state_dict' in ckpt_data:
+                try:
+                    scheduler.load_state_dict(ckpt_data['scheduler_state_dict'])
+                    logger.info("Restored scheduler state_dict from checkpoint.")
+                except Exception as e:
+                    logger.warning(f"Could not restore scheduler: {e}")
+            if 'scaler_state_dict' in ckpt_data:
+                try:
+                    scaler.load_state_dict(ckpt_data['scaler_state_dict'])
+                    logger.info("Restored scaler state_dict from checkpoint.")
+                except Exception as e:
+                    logger.warning(f"Could not restore scaler: {e}")
+            if 'rng_state' in ckpt_data and ckpt_data['rng_state'] is not None:
+                torch.set_rng_state(ckpt_data['rng_state'])
+            if torch.cuda.is_available() and ckpt_data.get('cuda_rng_state_all') is not None:
+                torch.cuda.set_rng_state_all(ckpt_data['cuda_rng_state_all'])
+            if ckpt_data.get('numpy_rng_state') is not None:
+                np.random.set_state(ckpt_data['numpy_rng_state'])
+            if ckpt_data.get('python_rng_state') is not None:
+                random.setstate(ckpt_data['python_rng_state'])
+            best_dice = float(ckpt_data.get('best_dice', 0.0))
+            best_loss = float(ckpt_data.get('best_loss', float('inf')))
+            epochs_no_improve = int(ckpt_data.get('epochs_no_improve', 0))
+            start_epoch = int(ckpt_data.get('epoch', 0))
+            if start_epoch > 0:
+                logger.info(f"Resuming single-stage from epoch {start_epoch}: Best Dice={best_dice:.4f}, Best Loss={best_loss:.4f}, epochs_no_improve={epochs_no_improve}")
+
+        for epoch in range(start_epoch + 1, total_epochs + 1):
             model.train()
             train_loss = 0.0
             train_lb_loss = 0.0
@@ -529,8 +576,18 @@ def main(args):
             last_save_dict = {
                 'epoch': int(epoch),
                 'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
                 'val_dice': float(val_dice),
                 'val_loss': float(val_loss),
+                'best_dice': float(best_dice),
+                'best_loss': float(best_loss),
+                'epochs_no_improve': int(epochs_no_improve),
+                'rng_state': torch.get_rng_state(),
+                'cuda_rng_state_all': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                'numpy_rng_state': np.random.get_state(),
+                'python_rng_state': random.getstate(),
                 'model_type': model_type,
             }
             if model_type in ['B1', 'B2']:
@@ -683,10 +740,46 @@ def main(args):
         else:
             scheduler = get_scheduler(optimizer, epochs=max_stage_epochs, warmup_epochs=warmup_epochs)
         
+        has_full_state = is_stage2_resume and (stage == 2) and ('optimizer_state_dict' in resume_data)
+
+        if has_full_state and not is_low_lr:
+            try:
+                optimizer.load_state_dict(resume_data['optimizer_state_dict'])
+                logger.info("Restored optimizer state_dict (AdamW moments) from checkpoint.")
+            except Exception as e:
+                logger.warning(f"Could not restore optimizer state_dict: {e}")
+
+        if has_full_state and not is_low_lr and ('scheduler_state_dict' in resume_data):
+            try:
+                scheduler.load_state_dict(resume_data['scheduler_state_dict'])
+                logger.info("Restored scheduler state_dict from checkpoint.")
+            except Exception as e:
+                logger.warning(f"Could not restore scheduler state_dict: {e}")
+
+        if is_stage2_resume and stage == 2 and ('scaler_state_dict' in resume_data):
+            try:
+                scaler.load_state_dict(resume_data['scaler_state_dict'])
+                logger.info("Restored AMP scaler state_dict from checkpoint.")
+            except Exception as e:
+                logger.warning(f"Could not restore scaler state_dict: {e}")
+
+        if is_stage2_resume and stage == 2:
+            if 'rng_state' in resume_data and resume_data['rng_state'] is not None:
+                torch.set_rng_state(resume_data['rng_state'])
+            if torch.cuda.is_available() and resume_data.get('cuda_rng_state_all') is not None:
+                torch.cuda.set_rng_state_all(resume_data['cuda_rng_state_all'])
+            if resume_data.get('numpy_rng_state') is not None:
+                np.random.set_state(resume_data['numpy_rng_state'])
+            if resume_data.get('python_rng_state') is not None:
+                random.setstate(resume_data['python_rng_state'])
+
         if is_stage2_resume and stage == 2:
             best_stage_dice = global_best_dice
             best_stage_loss = global_best_loss
-            epochs_no_improve = int(getattr(args, 'initial_epochs_no_improve', 0) or 0)
+            if getattr(args, 'initial_epochs_no_improve', 0) > 0:
+                epochs_no_improve = int(args.initial_epochs_no_improve)
+            else:
+                epochs_no_improve = int(resume_data.get('epochs_no_improve', 0))
             logger.info(
                 f"Stage 2 Extension starting with baseline Dice={best_stage_dice:.4f}, "
                 f"Loss={best_stage_loss:.4f}, initial epochs_no_improve={epochs_no_improve}/{patience}"
@@ -696,15 +789,27 @@ def main(args):
             best_stage_loss = float('inf')
             epochs_no_improve = 0
         actual_epochs_this_stage = 0
-        
-        for epoch in range(1, max_stage_epochs + 1):
-            actual_epochs_this_stage = epoch
+
+        if has_full_state and not is_low_lr:
+            start_epoch = int(resume_data.get('epoch', 0))
+            if getattr(args, 'stage2_epochs', None) is not None:
+                end_epoch = start_epoch + args.stage2_epochs
+            else:
+                end_epoch = total_budget - epochs_used_so_far
+            total_epochs_in_desc = end_epoch
+        else:
+            start_epoch = 0
+            end_epoch = max_stage_epochs
+            total_epochs_in_desc = max_stage_epochs
+
+        for epoch in range(start_epoch + 1, end_epoch + 1):
+            actual_epochs_this_stage += 1
             model.train()
             train_loss = 0.0
             train_lb_loss = 0.0
             train_acc, train_dice, train_iou = 0.0, 0.0, 0.0
             
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{max_stage_epochs} [Train]")
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs_in_desc} [Train]")
             for batch in pbar:
                 images = batch['image'].to(device, non_blocking=True)
                 labels = batch['label'].to(device, non_blocking=True)
@@ -839,10 +944,18 @@ def main(args):
                 'epoch': int(epoch),
                 'stage': int(stage),
                 'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
                 'val_dice': float(val_dice),
                 'val_loss': float(val_loss),
                 'best_dice': float(best_stage_dice),
                 'best_loss': float(best_stage_loss),
+                'epochs_no_improve': int(epochs_no_improve),
+                'rng_state': torch.get_rng_state(),
+                'cuda_rng_state_all': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                'numpy_rng_state': np.random.get_state(),
+                'python_rng_state': random.getstate(),
                 'model_type': model_type,
             }
             if model_type in ['B1', 'B2']:
