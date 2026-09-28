@@ -1,0 +1,61 @@
+{
+  "sample_count": 348,
+  "routers": {
+    "convnext.stage_0": {
+      "alias": "S0",
+      "layer_type": "CNN",
+      "feature_dim": 48,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "convnext.stage_1": {
+      "alias": "S1",
+      "layer_type": "CNN",
+      "feature_dim": 48,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "convnext.stage_2": {
+      "alias": "S2",
+      "layer_type": "CNN",
+      "feature_dim": 96,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "convnext.stage_3": {
+      "alias": "S3",
+      "layer_type": "CNN",
+      "feature_dim": 192,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "transformer.block_0": {
+      "alias": "B0",
+      "layer_type": "ViT",
+      "feature_dim": 192,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "transformer.block_1": {
+      "alias": "B1",
+      "layer_type": "ViT",
+      "feature_dim": 192,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "transformer.block_2": {
+      "alias": "B2",
+      "layer_type": "ViT",
+      "feature_dim": 192,
+      "num_experts": 8,
+      "top_k": 4
+    },
+    "transformer.block_3": {
+      "alias": "B3",
+      "layer_type": "ViT",
+      "feature_dim": 192,
+      "num_experts": 8,
+      "top_k": 4
+    }
+  }
+}

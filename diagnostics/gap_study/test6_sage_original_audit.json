@@ -1,0 +1,81 @@
+{
+  "status": "verified_present",
+  "target_file": "d:\\truong\\SpecialSubjectTTNT\\SAGE\\sage\\components\\router.py",
+  "exists": true,
+  "total_lines": 406,
+  "has_gap_or_mean_pooling": true,
+  "matched_patterns": {
+    "adaptive_pool_def": [
+      {
+        "line_number": 106,
+        "code": "self.feature_aggregator = nn.AdaptiveAvgPool2d((1, 1))"
+      }
+    ],
+    "cnn_pooling_call": [
+      {
+        "line_number": 189,
+        "code": "aggregated = self.feature_aggregator(x).squeeze(-1).squeeze(-1)"
+      }
+    ],
+    "transformer_mean_call": [
+      {
+        "line_number": 191,
+        "code": "aggregated = x.mean(dim=1)"
+      }
+    ],
+    "shared_gate_call": [
+      {
+        "line_number": 238,
+        "code": "g_s = torch.sigmoid(self.shared_expert_gate(aggregated_features))"
+      }
+    ],
+    "query_proj_call": [
+      {
+        "line_number": 241,
+        "code": "query = self.query_projection(aggregated_features)"
+      }
+    ]
+  },
+  "cnn_pooling_evidence": {
+    "verified": true,
+    "pool_definition": [
+      {
+        "line_number": 106,
+        "code": "self.feature_aggregator = nn.AdaptiveAvgPool2d((1, 1))"
+      }
+    ],
+    "pool_execution": [
+      {
+        "line_number": 189,
+        "code": "aggregated = self.feature_aggregator(x).squeeze(-1).squeeze(-1)"
+      }
+    ],
+    "mechanism": "nn.AdaptiveAvgPool2d((1, 1)) followed by squeeze(-1).squeeze(-1) -> Global Average Pooling to (B, C)"
+  },
+  "transformer_pooling_evidence": {
+    "verified": true,
+    "pool_execution": [
+      {
+        "line_number": 191,
+        "code": "aggregated = x.mean(dim=1)"
+      }
+    ],
+    "mechanism": "x.mean(dim=1) -> Global Mean Pooling across token sequence to (B, D)"
+  },
+  "downstream_coupling_evidence": {
+    "shared_gate_coupled_to_pooled_feature": true,
+    "query_projection_coupled_to_pooled_feature": true,
+    "gate_call_matches": [
+      {
+        "line_number": 238,
+        "code": "g_s = torch.sigmoid(self.shared_expert_gate(aggregated_features))"
+      }
+    ],
+    "query_call_matches": [
+      {
+        "line_number": 241,
+        "code": "query = self.query_projection(aggregated_features)"
+      }
+    ]
+  }
+}

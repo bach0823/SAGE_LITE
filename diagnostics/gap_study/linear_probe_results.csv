@@ -1,0 +1,17 @@
+router_name,router_alias,layer_type,feature_dim,target,r2_mean,r2_std,mae_mean,mae_std,rmse_mean,rmse_std
+convnext.stage_0,S0,CNN,48,gt_area,0.0489,0.1331,0.038366,0.006485,0.048357,0.007209
+convnext.stage_0,S0,CNN,48,thinness,-0.1452,0.0802,0.086218,0.004440,0.117841,0.007069
+convnext.stage_1,S1,CNN,48,gt_area,0.4561,0.0892,0.027792,0.005871,0.036651,0.006939
+convnext.stage_1,S1,CNN,48,thinness,0.0880,0.0763,0.073584,0.004639,0.105137,0.006811
+convnext.stage_2,S2,CNN,96,gt_area,0.5150,0.0735,0.025365,0.002207,0.034259,0.002467
+convnext.stage_2,S2,CNN,96,thinness,0.1223,0.1042,0.072195,0.005399,0.103092,0.008018
+convnext.stage_3,S3,CNN,192,gt_area,0.7934,0.0580,0.016954,0.001210,0.022268,0.002878
+convnext.stage_3,S3,CNN,192,thinness,0.0494,0.2497,0.076052,0.005188,0.106122,0.009703
+transformer.block_0,B0,ViT,192,gt_area,0.8186,0.0350,0.016346,0.001648,0.020931,0.002074
+transformer.block_0,B0,ViT,192,thinness,0.1998,0.0854,0.072263,0.004066,0.098405,0.006411
+transformer.block_1,B1,ViT,192,gt_area,0.8363,0.0471,0.015268,0.001522,0.019635,0.001899
+transformer.block_1,B1,ViT,192,thinness,0.1169,0.1427,0.077435,0.006611,0.103245,0.009335
+transformer.block_2,B2,ViT,192,gt_area,0.8477,0.0370,0.014908,0.001482,0.019129,0.002173
+transformer.block_2,B2,ViT,192,thinness,-0.1787,0.2062,0.087527,0.004509,0.118861,0.006316
+transformer.block_3,B3,ViT,192,gt_area,0.8292,0.0484,0.015509,0.001758,0.020197,0.002404
+transformer.block_3,B3,ViT,192,thinness,-0.1646,0.1404,0.085234,0.004823,0.118590,0.007526
