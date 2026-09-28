@@ -416,9 +416,15 @@ def main():
     num_layers = int(model_cfg.get("num_transformer_layers", 12))
     p3_mode = model_cfg.get("p3_mode", "C")
     img_size = int(model_cfg.get("img_size", 448))
+    sage_cfg = model_cfg.get("sage_config", {})
 
-    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size})...")
-    model = create_b2_unet(num_transformer_layers=num_layers, p3_mode=p3_mode, img_size=img_size).to(device)
+    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size}, top_k={sage_cfg.get('top_k', 4)})...")
+    model = create_b2_unet(
+        num_transformer_layers=num_layers,
+        p3_mode=p3_mode,
+        img_size=img_size,
+        sage_config=sage_cfg,
+    ).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -625,8 +631,8 @@ def main():
     summary_json_data = {
         'metadata': {
             'model': 'B2',
-            'p3_mode': 'C',
-            'architecture': 'ConvNeXt-Femto + 12 ViT + ASDW (1x7, 7x1, 3x3) + PE28',
+            'p3_mode': p3_mode,
+            'architecture': f'ConvNeXt-Femto + {num_layers} ViT + ASDW (1x7, 7x1, 3x3) + PE28 (top_k={sage_cfg.get("top_k", 4)})',
             'checkpoint': os.path.abspath(args.checkpoint),
             'total_samples': len(df),
             'evaluation_protocol': 'setting_a',
