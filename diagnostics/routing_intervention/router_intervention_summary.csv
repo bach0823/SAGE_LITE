@@ -1,0 +1,5 @@
+subgroup,intervened_routers,kept_adaptive,num_seeds,dice_mean,dice_std,dice_delta_vs_adaptive,iou_mean
+All_Random,['All (S0-B3)'],"['S0', 'S1', 'S2', 'S3', 'B0', 'B1', 'B2', 'B3']",5,0.763428,0.00036,-0.000508,0.640532
+Shallow_CNN_Only (S0-S2),"['S0', 'S2', 'S1']","['S3', 'B0', 'B1', 'B2', 'B3']",5,0.763233,0.000405,-0.000703,0.64029
+Deep_ViT_Only (B0-B3),"['B3', 'B0', 'B2', 'B1']","['S0', 'S1', 'S2', 'S3']",5,0.764301,5.5e-05,0.000364,0.641657
+All_CNN_Only (S0-S3),"['S0', 'S2', 'S3', 'S1']","['B0', 'B1', 'B2', 'B3']",5,0.763211,0.000516,-0.000725,0.640204

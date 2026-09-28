@@ -1,0 +1,344 @@
+{
+  "source": "checkpoint_training_usage",
+  "checkpoint": "D:\\truong\\SpecialSubjectTTNT\\results\\checkpoints\\P3_C_D4_best_model_b2_global.pth",
+  "canonical_epoch": 14,
+  "canonical_best_dice": 0.763907481054456,
+  "routers": {
+    "S0": {
+      "full_name": "backbone.convnext.stages.0.router",
+      "top_k_experts": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "top_k_counts": [
+        28506,
+        27235,
+        27206,
+        26869
+      ],
+      "top_k_fractions": [
+        0.134239,
+        0.128254,
+        0.128117,
+        0.12653
+      ],
+      "all_counts": [
+        26032,
+        25867,
+        24928,
+        25709,
+        28506,
+        27235,
+        27206,
+        26869
+      ],
+      "all_fractions": [
+        0.122589,
+        0.121812,
+        0.11739,
+        0.121068,
+        0.134239,
+        0.128254,
+        0.128117,
+        0.12653
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "S1": {
+      "full_name": "backbone.convnext.stages.1.router",
+      "top_k_experts": [
+        6,
+        1,
+        5,
+        3
+      ],
+      "top_k_counts": [
+        37530,
+        29897,
+        26131,
+        25495
+      ],
+      "top_k_fractions": [
+        0.176735,
+        0.14079,
+        0.123055,
+        0.12006
+      ],
+      "all_counts": [
+        23478,
+        29897,
+        22409,
+        25495,
+        24268,
+        26131,
+        37530,
+        23144
+      ],
+      "all_fractions": [
+        0.110562,
+        0.14079,
+        0.105528,
+        0.12006,
+        0.114282,
+        0.123055,
+        0.176735,
+        0.108989
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "S2": {
+      "full_name": "backbone.convnext.stages.2.router",
+      "top_k_experts": [
+        4,
+        6,
+        3,
+        5
+      ],
+      "top_k_counts": [
+        32133,
+        29322,
+        27379,
+        27007
+      ],
+      "top_k_fractions": [
+        0.15132,
+        0.138082,
+        0.128932,
+        0.12718
+      ],
+      "all_counts": [
+        24308,
+        26966,
+        24330,
+        27379,
+        32133,
+        27007,
+        29322,
+        20907
+      ],
+      "all_fractions": [
+        0.11447,
+        0.126987,
+        0.114574,
+        0.128932,
+        0.15132,
+        0.12718,
+        0.138082,
+        0.098454
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "S3": {
+      "full_name": "backbone.convnext.stages.3.router",
+      "top_k_experts": [
+        3,
+        5,
+        0,
+        2
+      ],
+      "top_k_counts": [
+        31475,
+        27987,
+        27167,
+        26896
+      ],
+      "top_k_fractions": [
+        0.148221,
+        0.131795,
+        0.127934,
+        0.126658
+      ],
+      "all_counts": [
+        27167,
+        25982,
+        26896,
+        31475,
+        25890,
+        27987,
+        22278,
+        24677
+      ],
+      "all_fractions": [
+        0.127934,
+        0.122353,
+        0.126658,
+        0.148221,
+        0.12192,
+        0.131795,
+        0.104911,
+        0.116208
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "B0": {
+      "full_name": "backbone.transformer_blocks.0.router",
+      "top_k_experts": [
+        0,
+        2,
+        6,
+        1
+      ],
+      "top_k_counts": [
+        27813,
+        27139,
+        26822,
+        26574
+      ],
+      "top_k_fractions": [
+        0.130976,
+        0.127802,
+        0.126309,
+        0.125141
+      ],
+      "all_counts": [
+        27813,
+        26574,
+        27139,
+        25764,
+        25882,
+        26029,
+        26822,
+        26329
+      ],
+      "all_fractions": [
+        0.130976,
+        0.125141,
+        0.127802,
+        0.121327,
+        0.121883,
+        0.122575,
+        0.126309,
+        0.123988
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "B1": {
+      "full_name": "backbone.transformer_blocks.1.router",
+      "top_k_experts": [
+        3,
+        4,
+        1,
+        2
+      ],
+      "top_k_counts": [
+        27939,
+        27484,
+        26891,
+        26405
+      ],
+      "top_k_fractions": [
+        0.131569,
+        0.129427,
+        0.126634,
+        0.124345
+      ],
+      "all_counts": [
+        26187,
+        26891,
+        26405,
+        27939,
+        27484,
+        26051,
+        25097,
+        26298
+      ],
+      "all_fractions": [
+        0.123319,
+        0.126634,
+        0.124345,
+        0.131569,
+        0.129427,
+        0.122678,
+        0.118186,
+        0.123842
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "B2": {
+      "full_name": "backbone.transformer_blocks.2.router",
+      "top_k_experts": [
+        0,
+        2,
+        4,
+        5
+      ],
+      "top_k_counts": [
+        27317,
+        27289,
+        27270,
+        27200
+      ],
+      "top_k_fractions": [
+        0.12864,
+        0.128508,
+        0.128419,
+        0.128089
+      ],
+      "all_counts": [
+        27317,
+        25497,
+        27289,
+        26620,
+        27270,
+        27200,
+        26343,
+        24816
+      ],
+      "all_fractions": [
+        0.12864,
+        0.12007,
+        0.128508,
+        0.125358,
+        0.128419,
+        0.128089,
+        0.124053,
+        0.116863
+      ],
+      "total_accumulated_counts": 212352
+    },
+    "B3": {
+      "full_name": "backbone.transformer_blocks.3.router",
+      "top_k_experts": [
+        0,
+        6,
+        3,
+        4
+      ],
+      "top_k_counts": [
+        27463,
+        27019,
+        26959,
+        26643
+      ],
+      "top_k_fractions": [
+        0.129328,
+        0.127237,
+        0.126954,
+        0.125466
+      ],
+      "all_counts": [
+        27463,
+        25870,
+        26443,
+        26959,
+        26643,
+        25874,
+        27019,
+        26081
+      ],
+      "all_fractions": [
+        0.129328,
+        0.121826,
+        0.124524,
+        0.126954,
+        0.125466,
+        0.121845,
+        0.127237,
+        0.12282
+      ],
+      "total_accumulated_counts": 212352
+    }
+  }
+}
