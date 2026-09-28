@@ -10,6 +10,8 @@ Targets:
 - Strictly Crack500 validation set (348 samples).
 - Eval mode (deterministic, exploration noise OFF).
 - Zero model parameter changes, zero architecture modifications.
+- Strict checkpoint integrity audit (fails loudly on any missing/unexpected keys).
+- Dynamic source code audit of original SAGE router implementation.
 
 Author: Special Subject AI Team
 Date: September 2026
@@ -240,7 +242,10 @@ def load_canonical_d4_model(
     device: torch.device,
     data_root_override: Optional[str] = None,
 ) -> Tuple[B2ConvNeXtViTUNet, Dict[str, Any], Dict[str, Any]]:
-    """Loads canonical D4 model and checkpoint safely with strict integrity checks."""
+    """
+    Loads canonical D4 model and checkpoint safely with strict integrity checks.
+    Fails loudly with RuntimeError if there are any missing or unexpected keys.
+    """
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
@@ -284,9 +289,27 @@ def load_canonical_d4_model(
     }
 
     initial_params_count = sum(p.numel() for p in model.parameters())
+    trainable_params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
     load_res = model.load_state_dict(cleaned_state_dict, strict=False)
-    logger.info(f"Loaded checkpoint (Epoch: {ckpt_metadata.get('epoch')}, Best Dice: {ckpt_metadata.get('best_dice'):.4f})")
-    logger.info(f"State dict keys: Missing={len(load_res.missing_keys)}, Unexpected={len(load_res.unexpected_keys)}")
+
+    best_dice_str = f"{ckpt_metadata['best_dice']:.4f}" if ckpt_metadata.get('best_dice') is not None else "N/A"
+    logger.info(f"Checkpoint path: {checkpoint_path}")
+    logger.info(f"Checkpoint metadata: Epoch={ckpt_metadata.get('epoch')}, Best Dice={best_dice_str}")
+    logger.info(f"State dict audit: missing_keys={len(load_res.missing_keys)}, unexpected_keys={len(load_res.unexpected_keys)}")
+    logger.info(f"Model parameters: Total={initial_params_count:,}, Trainable={trainable_params_count:,}")
+
+    # STRICT INTEGRITY CHECK: Fail loudly if any key is missing or unexpected
+    if load_res.missing_keys or load_res.unexpected_keys:
+        err_msg = (
+            f"STRICT INTEGRITY CHECK FAILURE: Checkpoint parameter mismatch detected!\n"
+            f"Checkpoint path: {checkpoint_path}\n"
+            f"Missing keys ({len(load_res.missing_keys)}): {load_res.missing_keys[:10]}\n"
+            f"Unexpected keys ({len(load_res.unexpected_keys)}): {load_res.unexpected_keys[:10]}\n"
+            f"Aborting evaluation. Diagnostics cannot proceed with mismatched parameters."
+        )
+        logger.error(err_msg)
+        raise RuntimeError(err_msg)
 
     model.eval()
     return model, config, ckpt_metadata
@@ -804,58 +827,116 @@ def run_test5_gs_modulation_magnitude(
 
 
 # -----------------------------------------------------------------------------
-# Test 6: Original SAGE Repository Audit
+# Test 6: Original SAGE Repository Dynamic Code Audit
 # -----------------------------------------------------------------------------
 
-def run_test6_original_sage_audit(output_dir: str) -> Dict[str, Any]:
+def run_test6_original_sage_audit(
+    sage_original_path: Optional[str],
+    output_dir: str,
+) -> Dict[str, Any]:
     """
     Test 6 — Original SAGE Codebase Inspection:
-    Examines router implementation in d:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py.
+    Dynamically opens and parses router.py in the original SAGE repository.
+    Verifies:
+    1. AdaptiveAvgPool2d((1, 1))
+    2. x.mean(dim=1)
+    3. shared_expert_gate(aggregated)
+    4. query_projection(aggregated)
+    Marks as 'not_available' if file does not exist.
     """
-    logger.info("--- Executing Test 6: Original SAGE Codebase Audit ---")
+    logger.info("--- Executing Test 6: Original SAGE Codebase Dynamic Audit ---")
     os.makedirs(output_dir, exist_ok=True)
 
-    sage_orig_path = "d:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py"
-    if not os.path.exists(sage_orig_path):
-        sage_orig_path = "D:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py"
+    resolved_path = None
+    if sage_original_path and os.path.exists(sage_original_path):
+        resolved_path = sage_original_path
+    else:
+        # Check standard default candidates
+        candidates = [
+            "d:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py",
+            "D:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py",
+            "../SAGE/sage/components/router.py",
+            "../../SAGE/sage/components/router.py",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                resolved_path = c
+                break
 
-    audit_info = {
-        "target_file": sage_orig_path,
-        "exists": os.path.exists(sage_orig_path),
-        "router_input_signal": {
-            "cnn_layers": "Intermediate feature map tensor of shape (B, C, H, W)",
-            "transformer_layers": "Token sequence tensor of shape (B, N, D)",
-            "other_layers": "Flattened vector (B, ...)",
-        },
-        "pooling_mechanism": {
-            "has_gap_or_mean_pooling": True,
-            "cnn_pooling_type": "nn.AdaptiveAvgPool2d((1, 1)) followed by squeeze(-1).squeeze(-1) -> Global Average Pooling to (B, C)",
-            "transformer_pooling_type": "x.mean(dim=1) -> Global Mean Pooling across token sequence to (B, D)",
-            "pooling_location": "Inside _aggregate_features_with_adaptation(x), lines 188-193 of router.py, immediately at the router entrance before all routing logic",
-        },
-        "downstream_routing_dependency": {
-            "shared_expert_gate_gs": "shared_expert_gate(aggregated) directly takes pooled feature vector (B, in_channels)",
-            "query_projection_sar": "query_projection(aggregated) directly takes pooled feature vector (B, in_channels)",
-            "spatial_awareness": "Neither spatial coordinates, patch locations, nor spatial variance are retained after aggregation",
-        },
-        "exact_code_snippets": {
-            "definition": "self.feature_aggregator = nn.AdaptiveAvgPool2d((1, 1))  # Line 106",
-            "aggregation": (
-                "if x.dim() == 4:\n"
-                "    aggregated = self.feature_aggregator(x).squeeze(-1).squeeze(-1)\n"
-                "elif x.dim() == 3:\n"
-                "    aggregated = x.mean(dim=1)\n"
-                "else:\n"
-                "    aggregated = x.flatten(1)"
-            ),
+    if resolved_path is None or not os.path.exists(resolved_path):
+        audit_info = {
+            "status": "not_available",
+            "target_file": sage_original_path or "None specified",
+            "exists": False,
+            "message": "SAGE original router.py not found at specified path. Test 6 marked as not_available.",
+            "has_gap_or_mean_pooling": False,
+            "matched_patterns": {},
+            "cnn_pooling_evidence": None,
+            "transformer_pooling_evidence": None,
+            "downstream_coupling_evidence": None,
         }
-    }
+        logger.warning(f"Test 6: SAGE original router.py not found (searched '{sage_original_path}'). Status: not_available.")
+    else:
+        logger.info(f"Test 6: Opening and dynamically parsing {resolved_path}...")
+        with open(resolved_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
+        # Dynamic search for target patterns
+        target_patterns = {
+            "adaptive_pool_def": "AdaptiveAvgPool2d((1, 1))",
+            "cnn_pooling_call": "feature_aggregator(x).squeeze(-1).squeeze(-1)",
+            "transformer_mean_call": "x.mean(dim=1)",
+            "shared_gate_call": "shared_expert_gate(aggregated",
+            "query_proj_call": "query_projection(aggregated",
+        }
+
+        matches = {}
+        for key, pat in target_patterns.items():
+            matches[key] = [
+                {"line_number": i + 1, "code": line.strip()}
+                for i, line in enumerate(lines)
+                if pat in line
+            ]
+
+        has_cnn_gap = len(matches["adaptive_pool_def"]) > 0 or len(matches["cnn_pooling_call"]) > 0
+        has_transformer_mean = len(matches["transformer_mean_call"]) > 0
+        has_gap_or_mean = has_cnn_gap and has_transformer_mean
+
+        has_shared_gate_coupling = len(matches["shared_gate_call"]) > 0
+        has_query_proj_coupling = len(matches["query_proj_call"]) > 0
+
+        audit_info = {
+            "status": "verified_present" if has_gap_or_mean else "pattern_mismatch",
+            "target_file": os.path.abspath(resolved_path),
+            "exists": True,
+            "total_lines": len(lines),
+            "has_gap_or_mean_pooling": has_gap_or_mean,
+            "matched_patterns": matches,
+            "cnn_pooling_evidence": {
+                "verified": has_cnn_gap,
+                "pool_definition": matches["adaptive_pool_def"],
+                "pool_execution": matches["cnn_pooling_call"],
+                "mechanism": "nn.AdaptiveAvgPool2d((1, 1)) followed by squeeze(-1).squeeze(-1) -> Global Average Pooling to (B, C)",
+            },
+            "transformer_pooling_evidence": {
+                "verified": has_transformer_mean,
+                "pool_execution": matches["transformer_mean_call"],
+                "mechanism": "x.mean(dim=1) -> Global Mean Pooling across token sequence to (B, D)",
+            },
+            "downstream_coupling_evidence": {
+                "shared_gate_coupled_to_pooled_feature": has_shared_gate_coupling,
+                "query_projection_coupled_to_pooled_feature": has_query_proj_coupling,
+                "gate_call_matches": matches["shared_gate_call"],
+                "query_call_matches": matches["query_proj_call"],
+            },
+        }
+        logger.info(f"Test 6: Parse complete. has_gap_or_mean_pooling={has_gap_or_mean}. Found {sum(len(v) for v in matches.values())} pattern occurrences.")
+
+    # Save JSON
     audit_json_path = os.path.join(output_dir, "test6_sage_original_audit.json")
     with open(audit_json_path, "w", encoding="utf-8") as f:
         json.dump(audit_info, f, indent=2)
 
-    logger.info("Test 6 Complete: Original SAGE codebase verified.")
     return audit_info
 
 
@@ -1021,17 +1102,45 @@ def generate_consolidated_markdown_report(
         "",
         "## 6. Test 6: Original SAGE Codebase Audit",
         "",
-        f"- **File Audited**: `{test6_audit['target_file']}` (Exists: `{test6_audit['exists']}`)",
-        f"- **CNN Router Input**: `{test6_audit['router_input_signal']['cnn_layers']}`",
-        f"- **Transformer Router Input**: `{test6_audit['router_input_signal']['transformer_layers']}`",
-        f"- **CNN Pooling Mechanism**: `{test6_audit['pooling_mechanism']['cnn_pooling_type']}`",
-        f"- **Transformer Pooling Mechanism**: `{test6_audit['pooling_mechanism']['transformer_pooling_type']}`",
-        f"- **Pooling Location**: `{test6_audit['pooling_mechanism']['pooling_location']}`",
-        "",
-        "```python",
-        "# Original SAGE aggregation implementation (sage/components/router.py lines 188-193):",
-        test6_audit["exact_code_snippets"]["aggregation"],
-        "```",
+    ])
+
+    if test6_audit.get("status") == "not_available":
+        lines.extend([
+            "> [!NOTE]",
+            f"> SAGE original router.py was not found at `{test6_audit['target_file']}` in this runtime environment.",
+            "> Test 6 is marked as **not_available** (no fabricated audit).",
+            "",
+        ])
+    else:
+        lines.extend([
+            f"- **Source File**: `{test6_audit['target_file']}` (Exists: True, Total Lines: {test6_audit.get('total_lines')})",
+            f"- **Audit Status**: `{test6_audit['status']}`",
+            f"- **Has GAP or Mean Pooling**: `{test6_audit['has_gap_or_mean_pooling']}`",
+            "",
+            "### Verified Evidence from Source Code",
+        ])
+        cnn_ev = test6_audit.get("cnn_pooling_evidence", {})
+        if cnn_ev and cnn_ev.get("pool_definition"):
+            lines.append(f"1. **CNN Pooling Definition (Line {cnn_ev['pool_definition'][0]['line_number']})**:")
+            lines.append(f"   ```python\n   {cnn_ev['pool_definition'][0]['code']}\n   ```")
+        if cnn_ev and cnn_ev.get("pool_execution"):
+            lines.append(f"   Execution (Line {cnn_ev['pool_execution'][0]['line_number']}):")
+            lines.append(f"   ```python\n   {cnn_ev['pool_execution'][0]['code']}\n   ```")
+
+        tf_ev = test6_audit.get("transformer_pooling_evidence", {})
+        if tf_ev and tf_ev.get("pool_execution"):
+            lines.append(f"2. **Transformer Mean Pooling Execution (Line {tf_ev['pool_execution'][0]['line_number']})**:")
+            lines.append(f"   ```python\n   {tf_ev['pool_execution'][0]['code']}\n   ```")
+
+        ds_ev = test6_audit.get("downstream_coupling_evidence", {})
+        if ds_ev and ds_ev.get("gate_call_matches"):
+            lines.append(f"3. **Shared Expert Gate $g_s$ Coupling (Line {ds_ev['gate_call_matches'][0]['line_number']})**:")
+            lines.append(f"   ```python\n   {ds_ev['gate_call_matches'][0]['code']}\n   ```")
+        if ds_ev and ds_ev.get("query_call_matches"):
+            lines.append(f"4. **Query Projection SAR Coupling (Line {ds_ev['query_call_matches'][0]['line_number']})**:")
+            lines.append(f"   ```python\n   {ds_ev['query_call_matches'][0]['code']}\n   ```")
+
+    lines.extend([
         "",
         "---",
         "",
@@ -1074,6 +1183,13 @@ def main():
     parser.add_argument("--batch-size", "--batch_size", dest="batch_size", type=int, default=4, help="Batch size for evaluation")
     parser.add_argument("--device", type=str, default=None, help="Device ('cuda' or 'cpu')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument(
+        "--sage-original-path", "--sage_original_path",
+        dest="sage_original_path",
+        type=str,
+        default="d:/truong/SpecialSubjectTTNT/SAGE/sage/components/router.py",
+        help="Path to original SAGE router.py file for Test 6 audit"
+    )
     args = parser.parse_args()
 
     # 1. Deterministic Setup
@@ -1092,7 +1208,7 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 2. Load Canonical D4 Model & Checkpoint
+    # 2. Load Canonical D4 Model & Checkpoint (Strict integrity audit)
     model, config, ckpt_meta = load_canonical_d4_model(
         config_path=args.config,
         checkpoint_path=args.checkpoint,
@@ -1192,7 +1308,7 @@ def main():
     test3_summary = run_test3_linear_probe(collectors, sample_morphologies, args.output_dir, seed=args.seed)
     test4_summary = run_test4_routing_sensitivity(collectors, sample_morphologies, args.output_dir)
     test5_summary = run_test5_gs_modulation_magnitude(collectors, args.output_dir)
-    test6_audit = run_test6_original_sage_audit(args.output_dir)
+    test6_audit = run_test6_original_sage_audit(args.sage_original_path, args.output_dir)
 
     # 7. Generate Master Consolidated Markdown Report
     report_path = generate_consolidated_markdown_report(
