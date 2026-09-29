@@ -276,7 +276,8 @@ def test_stage2_isolated_sage_lr():
         stage2_shared_lr=1e-4,
     )
     fb_names = {g['name'] for g in opt_fallback.param_groups}
-    assert fb_names == {'shared_experts', 'other_non_experts'}, f"Fallback should keep canonical groups, got {fb_names}"
+    assert fb_names == {'shared_experts', 'other_non_experts', 'p3_refinement'}, f"Fallback should keep canonical groups, got {fb_names}"
+    assert 'sage' not in fb_names, "Sage group should NOT exist when stage2_sage_lr is omitted/fallback"
 
     print("  --> PASS: Stage 2 SAGE LR isolation and fallback verified.")
 
