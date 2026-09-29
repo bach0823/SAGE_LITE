@@ -71,11 +71,12 @@ def test_stage1_isolated_sage_lr():
     print("  --> PASS: Stage 1 isolated SAGE LR parameter groups and backward compatibility verified.")
 
 def test_stage2_optimizer_partition_integrity():
-    print("[Test 2/3] Testing Stage 2 Optimizer parameter partition integrity and Phase 5.3 ratio...")
+    print("[Test 2/5] Testing Stage 2 Optimizer 4-tier parameter partition integrity...")
     model = create_b2_unet(num_transformer_layers=2, p3_mode="C", img_size=224)
 
     stage2_base_lr = 1e-4
     stage2_shared_lr = 5e-5  # r = 0.5
+    stage2_fine_lr = 1e-4
     stage2_p3_lr = 2e-4
     weight_decay = 0.05
 
@@ -83,6 +84,7 @@ def test_stage2_optimizer_partition_integrity():
         model,
         stage2_base_lr=stage2_base_lr,
         stage2_shared_lr=stage2_shared_lr,
+        stage2_fine_lr=stage2_fine_lr,
         stage2_p3_lr=stage2_p3_lr,
         weight_decay=weight_decay
     )
@@ -100,7 +102,9 @@ def test_stage2_optimizer_partition_integrity():
 
         if name == 'shared_experts':
             assert abs(lr - stage2_shared_lr) < 1e-10, f"Expected shared_lr {stage2_shared_lr}, got {lr}"
-        elif name == 'other_and_routers':
+        elif name == 'fine_grained_experts':
+            assert abs(lr - stage2_fine_lr) < 1e-10, f"Expected fine_lr {stage2_fine_lr}, got {lr}"
+        elif name == 'other_non_experts':
             assert abs(lr - stage2_base_lr) < 1e-10, f"Expected base_lr {stage2_base_lr}, got {lr}"
         elif name == 'p3_refinement':
             assert abs(lr - stage2_p3_lr) < 1e-10, f"Expected p3_lr {stage2_p3_lr}, got {lr}"
@@ -110,14 +114,29 @@ def test_stage2_optimizer_partition_integrity():
         assert wd in (0.0, weight_decay), f"Invalid weight decay {wd}"
 
     assert 'shared_experts' in names_found, "Group 'shared_experts' not found!"
-    assert 'other_and_routers' in names_found, "Group 'other_and_routers' not found!"
+    assert 'fine_grained_experts' in names_found, "Group 'fine_grained_experts' not found!"
+    assert 'other_non_experts' in names_found, "Group 'other_non_experts' not found!"
     assert 'p3_refinement' in names_found, "Group 'p3_refinement' not found!"
     assert total_group_params == len(trainable_params), f"Stage 2 partition count mismatch: {total_group_params} vs {len(trainable_params)}"
 
-    print("  --> PASS: Stage 2 parameter partition integrity and Phase 5.3 ratio verified.")
+    # Backward compatibility check: stage2_fine_lr=None falls back to stage2_base_lr
+    opt_compat = create_stage2_optimizer(
+        model,
+        stage2_base_lr=stage2_base_lr,
+        stage2_shared_lr=stage2_shared_lr,
+        stage2_fine_lr=None,
+        stage2_p3_lr=None,
+    )
+    for g in opt_compat.param_groups:
+        if g.get('name') == 'fine_grained_experts':
+            assert abs(g['lr'] - stage2_base_lr) < 1e-10, f"Default fine LR must match base LR ({stage2_base_lr}), got {g['lr']}"
+        if g.get('name') == 'p3_refinement':
+            assert abs(g['lr'] - stage2_base_lr) < 1e-10, f"Default P3 LR must match base LR ({stage2_base_lr}), got {g['lr']}"
+
+    print("  --> PASS: Stage 2 4-tier parameter partition integrity and backward compatibility verified.")
 
 def test_cli_and_config_resolution():
-    print("[Test 3/3] Testing CLI overrides and config fallback logic...")
+    print("[Test 3/5] Testing CLI overrides and config fallback logic...")
     from scripts.train_crack import CrackBinaryLoss
     
     # 1. Config fallback when sage_lr is omitted
@@ -136,23 +155,26 @@ def test_cli_and_config_resolution():
     assert sage_lr == 5e-5, f"Config explicit sage_lr failed: {sage_lr}"
     assert p3_lr == 2e-4, f"Config explicit p3_lr failed: {p3_lr}"
 
-    # 3. CLI parsing test
+    # 3. CLI parsing test for SAGE LR, P3 LR, and Stage 2 Fine LR
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=False)
     parser.add_argument('--lr', type=float, default=None)
     parser.add_argument('--sage-lr', '--sage_lr', type=float, default=None, dest='sage_lr')
     parser.add_argument('--p3-lr', '--p3_lr', type=float, default=None, dest='p3_lr')
+    parser.add_argument('--stage2-fine-lr', '--stage2_fine_lr', type=float, default=None, dest='stage2_fine_lr')
 
-    args1 = parser.parse_args(['--sage-lr', '5e-5'])
+    args1 = parser.parse_args(['--sage-lr', '5e-5', '--stage2-fine-lr', '8e-5'])
     assert args1.sage_lr == 5e-5
-    args2 = parser.parse_args(['--sage_lr', '2e-4'])
+    assert args1.stage2_fine_lr == 8e-5
+    args2 = parser.parse_args(['--sage_lr', '2e-4', '--stage2_fine_lr', '1.5e-4'])
     assert args2.sage_lr == 2e-4
+    assert args2.stage2_fine_lr == 1.5e-4
 
     print("  --> PASS: CLI and config fallback logic verified.")
 
 def test_sage_lr_invariance_across_tiers():
-    print("[Test 4/4] Testing invariance: varying sage_lr leaves backbone, decoder, p3, and Stage 2 untouched...")
+    print("[Test 4/5] Testing invariance: varying sage_lr leaves backbone, decoder, p3, and Stage 2 untouched...")
     model = create_b2_unet(num_transformer_layers=2, p3_mode="C", img_size=224)
 
     base_lr = 1e-4
@@ -188,6 +210,7 @@ def test_sage_lr_invariance_across_tiers():
             model,
             stage2_base_lr=1e-4,
             stage2_shared_lr=1e-4,
+            stage2_fine_lr=1e-4,
             stage2_p3_lr=1e-4,
         )
         for g in stage2_opt.param_groups:
@@ -195,9 +218,45 @@ def test_sage_lr_invariance_across_tiers():
 
     print("  --> PASS: Strict invariance confirmed: varying sage_lr strictly isolates SAGE tier without touching backbone, decoder, p3, or Stage 2.")
 
+def test_phase5_3_ratio_isolation():
+    print("[Test 5/5] Testing Phase 5.3 ratio isolation: r = LR_shared / LR_fine leaves other_non_experts and p3 fixed...")
+    model = create_b2_unet(num_transformer_layers=2, p3_mode="C", img_size=224)
+
+    fixed_base_lr = 1e-4
+    fixed_p3_lr = 1e-4
+    base_fine_lr = 1e-4
+
+    ratios = [0.25, 0.50, 1.00, 2.00]
+    for r in ratios:
+        stage2_shared = r * base_fine_lr
+        stage2_fine = base_fine_lr
+
+        opt = create_stage2_optimizer(
+            model,
+            stage2_base_lr=fixed_base_lr,
+            stage2_shared_lr=stage2_shared,
+            stage2_fine_lr=stage2_fine,
+            stage2_p3_lr=fixed_p3_lr,
+        )
+
+        for g in opt.param_groups:
+            name = g.get('name')
+            lr = g['lr']
+            if name == 'shared_experts':
+                assert abs(lr - stage2_shared) < 1e-10, f"Ratio {r}: shared_lr mismatch"
+            elif name == 'fine_grained_experts':
+                assert abs(lr - stage2_fine) < 1e-10, f"Ratio {r}: fine_lr mismatch"
+            elif name == 'other_non_experts':
+                assert abs(lr - fixed_base_lr) < 1e-10, f"Ratio {r}: other_non_experts modified! Expected {fixed_base_lr}, got {lr}"
+            elif name == 'p3_refinement':
+                assert abs(lr - fixed_p3_lr) < 1e-10, f"Ratio {r}: p3_refinement modified! Expected {fixed_p3_lr}, got {lr}"
+
+    print("  --> PASS: Phase 5.3 ratio isolation verified across all ratios (r in [0.25, 0.50, 1.00, 2.00]).")
+
 if __name__ == '__main__':
     test_stage1_isolated_sage_lr()
     test_stage2_optimizer_partition_integrity()
     test_cli_and_config_resolution()
     test_sage_lr_invariance_across_tiers()
-    print("\nALL SAGE LR ISOLATION AND OPTIMIZER TESTS PASSED (4/4)!")
+    test_phase5_3_ratio_isolation()
+    print("\nALL SAGE LR ISOLATION AND 4-TIER STAGE 2 TESTS PASSED (5/5)!")

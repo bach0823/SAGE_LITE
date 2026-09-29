@@ -71,18 +71,22 @@ def create_stage2_optimizer(
     model: nn.Module,
     stage2_base_lr: float,
     stage2_shared_lr: float,
+    stage2_fine_lr: Optional[float] = None,
     stage2_p3_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
 ) -> optim.Optimizer:
     """
-    Construct Stage-2 optimizer parameter groups according to SAGE-Lite protocol:
-    - Shared experts (CNN main_block stages): stage2_shared_lr
-    - P3 refinement (ASDW / Generic DW): stage2_p3_lr (defaults to stage2_base_lr)
-    - Other components (ViT blocks, routers, SA-Hub adapters, decoder, bridge layers): stage2_base_lr
-    - Weight decay: 0.0 for LayerNorm/Norm, biases, and gamma; weight_decay (0.05) for weights.
-    - All trainable parameters retain requires_grad=True (no freezing).
+    Construct Stage-2 optimizer parameter groups according to SAGE-Lite 4-tier semantic protocol:
+    - Tier 1: Shared experts (4 CNN expert main blocks): stage2_shared_lr
+    - Tier 2: Fine-grained / non-shared experts (ViT expert blocks: backbone.transformer_blocks): stage2_fine_lr
+    - Tier 3: Other non-expert modules (Routers, SA-Hub, Decoder, Bridge/interface layers): stage2_base_lr
+    - Tier 4: P3 refinement (ASDW / Generic DW weights + gamma): stage2_p3_lr
+    - Each tier split into decay (weight_decay) and no_decay (0.0 for Norm/bias/gamma).
+    - Partition assertions: 0 missing parameters, 0 duplicates.
     """
+    if stage2_fine_lr is None:
+        stage2_fine_lr = stage2_base_lr
     if stage2_p3_lr is None:
         stage2_p3_lr = stage2_base_lr
     if shared_prefixes is None:
@@ -91,10 +95,12 @@ def create_stage2_optimizer(
     groups = {
         'shared_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
         'shared_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
+        'fine_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_fine_lr, 'name': 'fine_grained_experts'},
+        'fine_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_fine_lr, 'name': 'fine_grained_experts'},
+        'others_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_base_lr, 'name': 'other_non_experts'},
+        'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_non_experts'},
         'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
         'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
-        'others_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
-        'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_and_routers'},
     }
 
     shared_param_ids = set()
@@ -104,6 +110,26 @@ def create_stage2_optimizer(
             block = stage.main_block if hasattr(stage, 'main_block') else stage
             for p in block.parameters():
                 shared_param_ids.add(id(p))
+
+    fine_param_ids = set()
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'transformer_blocks'):
+        for block in model.backbone.transformer_blocks:
+            main_b = block.main_block if hasattr(block, 'main_block') else block
+            for p in main_b.parameters():
+                fine_param_ids.add(id(p))
+    elif hasattr(model, 'backbone') and hasattr(model.backbone, 'transformer') and hasattr(model.backbone.transformer, 'layers'):
+        for layer in model.backbone.transformer.layers:
+            main_b = layer.main_block if hasattr(layer, 'main_block') else layer
+            for p in main_b.parameters():
+                fine_param_ids.add(id(p))
+    elif hasattr(model, 'expert_pool'):
+        num_shared = 4
+        if hasattr(model, 'backbone') and hasattr(model.backbone, 'num_sage_experts'):
+            num_shared = model.backbone.num_sage_experts
+        for idx in range(num_shared, len(model.expert_pool)):
+            expert = model.expert_pool[idx]
+            for p in expert.parameters():
+                fine_param_ids.add(id(p))
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -115,6 +141,8 @@ def create_stage2_optimizer(
             tier = 'p3'
         elif (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes):
             tier = 'shared'
+        elif id(param) in fine_param_ids:
+            tier = 'fine'
         else:
             tier = 'others'
 
@@ -539,13 +567,21 @@ def main(args):
             train_dice /= len(train_loader)
             train_lb_loss /= len(train_loader)
 
+            shared_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), None)
+            fine_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'fine_grained_experts'), None)
+            base_lr_val = next((g['lr'] for g in optimizer.param_groups if g.get('name') in ('other_and_routers', 'other_non_experts')), None)
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
             sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
             p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
-            lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
-            if sage_lr is not None:
-                lr_str += f", SAGE={sage_lr:.2e}"
+
+            if shared_lr is not None:
+                fine_str = f", Fine={fine_lr:.2e}" if fine_lr is not None else ""
+                lr_str = f"Shared={shared_lr:.2e}{fine_str}, Base={base_lr_val:.2e}"
+            else:
+                lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
+                if sage_lr is not None:
+                    lr_str += f", SAGE={sage_lr:.2e}"
             if p3_lr_cur is not None:
                 g0, g1 = get_p3_gamma_values(model)
                 lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
@@ -727,18 +763,30 @@ def main(args):
                 target_lr = float(getattr(args, 'low_lr', None) or getattr(args, 'stage2_base_lr', None) or 1e-6)
                 stage2_base_lr = target_lr
                 stage2_shared_lr = target_lr
+                stage2_fine_lr = target_lr
                 stage2_p3_lr = target_lr
                 logger.info(f"Stage 2 Low-LR Extension: keeping constant LR floor={target_lr:.2e} across all groups")
             else:
                 stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
                 stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
+                stage2_fine_lr = getattr(args, 'stage2_fine_lr', None)
+                if stage2_fine_lr is not None:
+                    stage2_fine_lr = float(stage2_fine_lr)
+                elif "stage2_fine_lr" in config:
+                    stage2_fine_lr = float(config["stage2_fine_lr"])
+                else:
+                    stage2_fine_lr = stage2_base_lr
                 stage2_p3_lr = float(getattr(args, 'stage2_p3_lr', None) or config.get("stage2_p3_lr", p3_lr))
 
-            logger.info(f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e}")
+            logger.info(
+                f"Stage 2 Optimizer (4 Tiers): shared_lr={stage2_shared_lr:.2e}, fine_lr={stage2_fine_lr:.2e}, "
+                f"base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e}"
+            )
             optimizer = create_stage2_optimizer(
                 model,
                 stage2_base_lr=stage2_base_lr,
                 stage2_shared_lr=stage2_shared_lr,
+                stage2_fine_lr=stage2_fine_lr,
                 stage2_p3_lr=stage2_p3_lr,
             )
         else:
@@ -876,11 +924,13 @@ def main(args):
             
             if stage == 2:
                 sh_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), 0.0)
-                oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'other_and_routers'), 0.0)
+                fine_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'fine_grained_experts'), 0.0)
+                oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') in ('other_non_experts', 'other_and_routers')), 0.0)
                 p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
-                lr_str = f"Shared={sh_lr:.2e}, Others={oth_lr:.2e}"
+                lr_str = f"Shared={sh_lr:.2e}, Fine={fine_lr:.2e}, Base={oth_lr:.2e}"
                 if p3_lr_cur is not None:
-                    lr_str += f", P3={p3_lr_cur:.2e}"
+                    g0, g1 = get_p3_gamma_values(model)
+                    lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
             else:
                 bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
                 dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
@@ -1026,6 +1076,7 @@ if __name__ == '__main__':
     parser.add_argument('--initial-epochs-no-improve', type=int, default=0, help='Initial epochs without improvement counter for early stopping (e.g. 2 if resuming after 2 non-improving epochs)')
     parser.add_argument('--stage2-base-lr', type=float, default=None, help='Override stage2_base_lr')
     parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
+    parser.add_argument('--stage2-fine-lr', '--stage2_fine_lr', type=float, default=None, dest='stage2_fine_lr', help='Override stage2_fine_lr')
     parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
     args = parser.parse_args()

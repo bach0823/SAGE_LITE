@@ -58,34 +58,41 @@ def test_stage2_optimizer_partitioning():
 
     group_names = [g['name'] for g in optimizer.param_groups]
     print(f"Optimizer param groups: {group_names}")
-    assert len(optimizer.param_groups) == 4, f"Expected 4 groups, got {len(optimizer.param_groups)}"
+    assert len(optimizer.param_groups) == 6, f"Expected 6 groups (shared, fine, others x decay/no_decay), got {len(optimizer.param_groups)}"
 
     # Verify LRs and weight decays
     for g in optimizer.param_groups:
         if g['name'] == 'shared_experts':
             assert g['lr'] == stage2_shared_lr, f"Expected shared LR {stage2_shared_lr}, got {g['lr']}"
-        elif g['name'] == 'other_and_routers':
+        elif g['name'] == 'fine_grained_experts':
+            assert g['lr'] == stage2_base_lr, f"Expected fine LR {stage2_base_lr}, got {g['lr']}"
+        elif g['name'] == 'other_non_experts':
             assert g['lr'] == stage2_base_lr, f"Expected base LR {stage2_base_lr}, got {g['lr']}"
 
     # Partition sets
     shared_params = []
+    fine_params = []
     other_params = []
     for g in optimizer.param_groups:
         if g['name'] == 'shared_experts':
             shared_params.extend(g['params'])
+        elif g['name'] == 'fine_grained_experts':
+            fine_params.extend(g['params'])
         else:
             other_params.extend(g['params'])
 
     shared_set = set(shared_params)
+    fine_set = set(fine_params)
     other_set = set(other_params)
 
     # 1. Disjointness
-    intersection = shared_set.intersection(other_set)
-    assert len(intersection) == 0, f"Found {len(intersection)} overlapping parameters between shared and other groups!"
+    assert len(shared_set.intersection(fine_set)) == 0, "Overlap between shared and fine groups!"
+    assert len(shared_set.intersection(other_set)) == 0, "Overlap between shared and other groups!"
+    assert len(fine_set.intersection(other_set)) == 0, "Overlap between fine and other groups!"
 
     # 2. Completeness
     all_trainable = [p for p in model.parameters() if p.requires_grad]
-    all_grouped = shared_params + other_params
+    all_grouped = shared_params + fine_params + other_params
     assert len(all_trainable) == len(all_grouped), f"Trainable params ({len(all_trainable)}) != grouped params ({len(all_grouped)})"
     assert set(all_trainable) == set(all_grouped), "Set of trainable params does not match grouped params!"
 
@@ -99,13 +106,19 @@ def test_stage2_optimizer_partitioning():
             assert p in shared_set, f"A parameter of CNN stage {stage_idx} was NOT placed in shared_experts!"
         print(f"  [POSITIVE VERIFIED] All {len(params)} parameters of CNN Stage {stage_idx} main_block -> shared_experts")
 
-
-    # 4. Specific negative assertions: router, sa_hub, alpha, ViT, decoder must be in other_set
+    # 4. Specific assertions: ViT blocks in fine_set, non-experts in other_set
     named_params = dict(model.named_parameters())
+    for k, p in named_params.items():
+        if "backbone.transformer_blocks.0.main_block." in k and p.requires_grad:
+            assert p in fine_set, f"ViT parameter {k} was not in fine_grained_experts!"
+            assert p not in shared_set, f"ViT parameter {k} leaked into shared_experts!"
+            assert p not in other_set, f"ViT parameter {k} leaked into other_non_experts!"
+            print(f"  [FINE VERIFIED] {k} -> fine_grained_experts")
+            break
+
     negative_checks = [
         "backbone.convnext.stages.0.router.",
         "backbone.convnext.stages.0.alpha",
-        "backbone.transformer_blocks.0.main_block.",
         "decoder.",
     ]
     for prefix in negative_checks:
@@ -115,11 +128,12 @@ def test_stage2_optimizer_partitioning():
                 found_key = k
                 break
         if found_key is not None:
-            assert named_params[found_key] in other_set, f"Parameter {found_key} was incorrectly placed in shared_experts!"
+            assert named_params[found_key] in other_set, f"Parameter {found_key} was incorrectly placed in other_set!"
             assert named_params[found_key] not in shared_set, f"Parameter {found_key} leaked into shared_experts!"
-            print(f"  [NEGATIVE VERIFIED] {found_key} -> other_and_routers")
+            assert named_params[found_key] not in fine_set, f"Parameter {found_key} leaked into fine_grained_experts!"
+            print(f"  [NON-EXPERT VERIFIED] {found_key} -> other_non_experts")
 
-    print("TEST 1 PASSED: Parameter partitioning is strictly correct and disjoint!")
+    print("TEST 1 PASSED: Parameter partitioning across all tiers is strictly correct and disjoint!")
 
 
 def test_stage2_execution_smoke():
