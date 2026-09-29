@@ -7,7 +7,7 @@ Dedicated helpers for Stage-2 initialization and checkpoint/RNG handling:
 - load_stage2_rng_checkpoint: loads RNG checkpoint dictionary safely
 - restore_rng_states: restores 5 RNG states (torch CPU, torch CUDA, numpy, python, dataloader generator)
 - restore_scaler_state: restores GradScaler state dict
-- validate_checkpoint_compatibility: validates model_type and p3_mode compatibility
+- warn_checkpoint_compatibility: logs warning if model_type or p3_mode differs
 """
 
 import os
@@ -22,13 +22,13 @@ import torch
 import torch.nn as nn
 
 
-def validate_checkpoint_compatibility(
+def warn_checkpoint_compatibility(
     ckpt_data: Dict[str, Any],
     model_type: str = "B2",
     p3_mode: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
 ) -> None:
-    """Validate model type and P3 mode compatibility between checkpoint and config."""
+    """Log warning if model type or P3 mode between checkpoint and config differs."""
     ckpt_type = ckpt_data.get('model_type')
     if ckpt_type and ckpt_type != model_type:
         if logger:
@@ -37,6 +37,10 @@ def validate_checkpoint_compatibility(
     if ckpt_p3 is not None and p3_mode is not None and ckpt_p3 != p3_mode:
         if logger:
             logger.warning(f"Checkpoint p3_mode '{ckpt_p3}' differs from config '{p3_mode}'")
+
+
+# Alias for backward compatibility
+validate_checkpoint_compatibility = warn_checkpoint_compatibility
 
 
 def load_stage1_checkpoint_for_stage2(
@@ -70,7 +74,7 @@ def load_stage1_checkpoint_for_stage2(
     if logger:
         logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
     stage1_data = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-    validate_checkpoint_compatibility(stage1_data, model_type, p3_mode, logger)
+    warn_checkpoint_compatibility(stage1_data, model_type, p3_mode, logger)
     model.load_state_dict(stage1_data.get('model_state_dict', stage1_data))
 
     global_best_dice = float(stage1_data.get('best_dice', 0.0))

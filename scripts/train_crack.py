@@ -30,20 +30,16 @@ from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 try:
     from scripts.stage2_utils import (
         load_stage1_checkpoint_for_stage2,
-        resolve_stage2_rng_checkpoint,
         load_stage2_rng_checkpoint,
         restore_rng_states,
         restore_scaler_state,
-        validate_checkpoint_compatibility,
     )
 except ImportError:
     from stage2_utils import (
         load_stage1_checkpoint_for_stage2,
-        resolve_stage2_rng_checkpoint,
         load_stage2_rng_checkpoint,
         restore_rng_states,
         restore_scaler_state,
-        validate_checkpoint_compatibility,
     )
 
 DEFAULT_SHARED_PREFIXES = {
