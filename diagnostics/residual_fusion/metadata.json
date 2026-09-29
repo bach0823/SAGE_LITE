@@ -1,0 +1,66 @@
+{
+  "checkpoint_path": "D:\\truong\\SpecialSubjectTTNT\\results\\checkpoints\\P3_C_D4_best_model_b2_global.pth",
+  "checkpoint_sha256": "33b0299dde38a4f29cfe0c3b0c3b6a27f14d4381a7efffdfd4d009843fa058ef",
+  "model_config": {
+    "num_transformer_layers": 4,
+    "p3_mode": "C",
+    "img_size": 448,
+    "sage_config": {
+      "top_k": 4,
+      "gating_type": "sigmoid",
+      "shared_expert_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "router_hidden_dim": 64,
+      "load_balance_factor": 0.01,
+      "logit_modulation": true,
+      "expert_dropout": 0.1,
+      "fusion_type": "residual",
+      "residual_scale": 0.1
+    },
+    "total_parameters": 10118955
+  },
+  "dataset_split": "Crack500 Validation Split (val)",
+  "n_samples": 348,
+  "evaluation_settings": {
+    "protocol": "Setting A non-overlapping tiling 448x448",
+    "stride": 448,
+    "padding": "reflect_101",
+    "batch_size": 16,
+    "exploration_noise": "OFF",
+    "eval_mode": "deterministic"
+  },
+  "canonical_alpha": 0.1,
+  "frozen_routing_protocol": "Phase 1: Cached (top_k_indices, gating_weights) per tile per router at alpha=0.1. Phase 2: Injected cached routing into SageLayer, bypassed router selection, recomputed expert output dynamically on cascaded downstream representations, fused y_l = M_l + alpha_l * E_l.",
+  "exact_alpha_grids": {
+    "vit_group": [
+      0.0,
+      0.025,
+      0.05,
+      0.075,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "s3_isolated": [
+      0.0,
+      0.05,
+      0.1,
+      0.2,
+      0.3
+    ],
+    "shallow_cnn": [
+      0.0,
+      0.05,
+      0.1,
+      0.2,
+      0.3
+    ]
+  },
+  "timestamp": "2026-09-29T01:01:26.604759",
+  "git_commit": "3d11610d7ed423b9ceeaf47bd0c88d388bf562af",
+  "elapsed_seconds": 2766.36
+}

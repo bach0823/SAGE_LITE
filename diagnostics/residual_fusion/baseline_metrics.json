@@ -1,0 +1,14 @@
+{
+  "mean_dice": 0.763936,
+  "std_dice": 0.163962,
+  "median_dice": 0.804921,
+  "mean_iou": 0.641186,
+  "precision": 0.72983,
+  "recall": 0.849805,
+  "q1_dice": 0.847262,
+  "q2_dice": 0.800476,
+  "q3_dice": 0.74435,
+  "q4_dice": 0.663657,
+  "canonical_target_dice": 0.763907,
+  "verification_delta": 2.9e-05
+}

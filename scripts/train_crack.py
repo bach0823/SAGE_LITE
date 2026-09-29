@@ -284,6 +284,8 @@ def main(args):
         config['num_workers'] = args.num_workers
     if getattr(args, 'lr', None) is not None:
         config['lr'] = args.lr
+    if getattr(args, 'sage_lr', None) is not None:
+        config['sage_lr'] = args.sage_lr
     if getattr(args, 'p3_lr', None) is not None:
         config['p3_lr'] = args.p3_lr
     if getattr(args, 'gamma_init', None) is not None:
@@ -413,11 +415,12 @@ def main(args):
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     base_lr = float(config.get('lr', 1e-4))
+    sage_lr = float(config.get('sage_lr', base_lr))
     p3_lr = float(config.get('p3_lr', base_lr))
     warmup_epochs = int(config.get('warmup_epochs', 3))
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
-    lr_sage = base_lr
+    lr_sage = sage_lr
 
     two_stage = (
         getattr(args, 'two_stage', False)
@@ -430,7 +433,8 @@ def main(args):
         logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
         total_epochs = int(config.get('epochs', 30))
         patience = int(config.get('patience', 6))
-        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, P3 LR: {p3_lr}")
+        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, SAGE LR: {lr_sage}, P3 LR: {p3_lr}")
+        logger.info(f"Single-Stage Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}")
 
         param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
@@ -738,6 +742,7 @@ def main(args):
                 stage2_p3_lr=stage2_p3_lr,
             )
         else:
+            logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}")
             param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
             optimizer = optim.AdamW(param_groups)
 
@@ -1005,7 +1010,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=None, help='Override training batch_size')
     parser.add_argument('--num-workers', type=int, default=None, help='Override DataLoader num_workers')
     parser.add_argument('--lr', type=float, default=None, help='Override base learning rate')
-    parser.add_argument('--p3-lr', type=float, default=None, help='Override P3 refinement learning rate')
+    parser.add_argument('--sage-lr', '--sage_lr', type=float, default=None, dest='sage_lr', help='Override SAGE routing/adaptation learning rate')
+    parser.add_argument('--p3-lr', '--p3_lr', type=float, default=None, dest='p3_lr', help='Override P3 refinement learning rate')
     parser.add_argument('--gamma-init', type=float, default=None, help='Override initial gamma value for P3 refinement')
     parser.add_argument('--epochs', type=int, default=None, help='Override total training epochs')
     parser.add_argument('--warmup-epochs', type=int, default=None, help='Override scheduler warmup epochs')
