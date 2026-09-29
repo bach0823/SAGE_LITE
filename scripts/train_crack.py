@@ -667,7 +667,12 @@ def main(args):
         or (getattr(args, 'stage2_only', False) and getattr(args, 'checkpoint', None) is not None)
     )
     is_low_lr = getattr(args, 'resume_stage2_low_lr', False)
-    stages_to_run = [2] if (args.stage2_only or is_stage2_resume) else [1, 2]
+    if getattr(args, 'stage1_only', False):
+        stages_to_run = [1]
+    elif args.stage2_only or is_stage2_resume:
+        stages_to_run = [2]
+    else:
+        stages_to_run = [1, 2]
     
     if is_stage2_resume:
         resume_ckpt_path = args.checkpoint
@@ -1050,6 +1055,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train SAGE-Lite Models for Crack Segmentation')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
+    parser.add_argument('--stage1-only', action='store_true', help='Run only Stage 1 in two-stage training and exit')
     parser.add_argument('--stage2-only', action='store_true', help='Skip Stage 1 and resume directly to Stage 2 using stage 1 checkpoint')
     parser.add_argument('--stage1-epochs-used', type=int, default=None, help='Explicitly specify how many epochs Stage 1 actually ran')
     parser.add_argument('--two-stage', action='store_true', help='Enable legacy 2-stage ladder training (default is single-stage)')
