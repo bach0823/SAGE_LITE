@@ -146,10 +146,11 @@ def test_cli_and_config_resolution():
     parser = build_parser()
 
     # Test real CLI parsing for valid Stage 2 and SAGE LR arguments
-    args1 = parser.parse_args(['--config', 'dummy.yaml', '--sage-lr', '5e-5', '--stage2-shared-lr', '8e-5', '--stage2-base-lr', '1e-4', '--p3-lr', '2e-4'])
+    args1 = parser.parse_args(['--config', 'dummy.yaml', '--sage-lr', '5e-5', '--stage2-shared-lr', '8e-5', '--stage2-base-lr', '1e-4', '--stage2-sage-lr', '2e-4', '--p3-lr', '2e-4'])
     assert args1.sage_lr == 5e-5, f"Real parser failed sage_lr: {args1.sage_lr}"
     assert args1.stage2_shared_lr == 8e-5, f"Real parser failed stage2_shared_lr: {args1.stage2_shared_lr}"
     assert args1.stage2_base_lr == 1e-4, f"Real parser failed stage2_base_lr: {args1.stage2_base_lr}"
+    assert args1.stage2_sage_lr == 2e-4, f"Real parser failed stage2_sage_lr: {args1.stage2_sage_lr}"
     assert args1.p3_lr == 2e-4, f"Real parser failed p3_lr: {args1.p3_lr}"
 
     # Also test alternative flag aliases
@@ -245,10 +246,46 @@ def test_phase5_3_ratio_isolation():
     print("  --> PASS: Phase 5.3 ratio isolation verified across all ratios (r in [0.25, 0.50, 1.00, 2.00]).")
 
 
+def test_stage2_isolated_sage_lr():
+    print("[Test 6/6] Testing Stage 2 isolated SAGE LR (Phase 5.1 Extra)...")
+    model = create_b2_unet(num_transformer_layers=2, p3_mode="C", img_size=224)
+
+    # 1. When stage2_sage_lr is specified (e.g. 2e-4) and differs from stage2_base_lr (1e-4)
+    opt = create_stage2_optimizer(
+        model,
+        stage2_base_lr=1e-4,
+        stage2_shared_lr=1e-4,
+        stage2_sage_lr=2e-4,
+        stage2_p3_lr=1e-4,
+    )
+    group_names = {g['name'] for g in opt.param_groups}
+    assert 'sage' in group_names, f"Expected 'sage' group in optimizer, got: {group_names}"
+    for g in opt.param_groups:
+        name = g['name']
+        if name == 'sage':
+            assert abs(g['lr'] - 2e-4) < 1e-10, f"Expected SAGE LR 2e-4, got {g['lr']}"
+        elif name == 'other_non_experts':
+            assert abs(g['lr'] - 1e-4) < 1e-10, f"Expected Base LR 1e-4, got {g['lr']}"
+        elif name == 'shared_experts':
+            assert abs(g['lr'] - 1e-4) < 1e-10, f"Expected Shared LR 1e-4, got {g['lr']}"
+
+    # 2. When stage2_sage_lr is omitted (None), fallback to stage2_base_lr
+    opt_fallback = create_stage2_optimizer(
+        model,
+        stage2_base_lr=1e-4,
+        stage2_shared_lr=1e-4,
+    )
+    fb_names = {g['name'] for g in opt_fallback.param_groups}
+    assert fb_names == {'shared_experts', 'other_non_experts'}, f"Fallback should keep canonical groups, got {fb_names}"
+
+    print("  --> PASS: Stage 2 SAGE LR isolation and fallback verified.")
+
+
 if __name__ == '__main__':
     test_stage1_isolated_sage_lr()
     test_stage2_optimizer_partition_integrity()
     test_cli_and_config_resolution()
     test_sage_lr_invariance_across_tiers()
     test_phase5_3_ratio_isolation()
-    print("\nALL SAGE LR ISOLATION AND STAGE 2 TESTS PASSED (5/5)!")
+    test_stage2_isolated_sage_lr()
+    print("\nALL SAGE LR ISOLATION AND STAGE 2 TESTS PASSED (6/6)!")

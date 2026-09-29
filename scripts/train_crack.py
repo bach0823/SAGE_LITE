@@ -71,6 +71,7 @@ def create_stage2_optimizer(
     model: nn.Module,
     stage2_base_lr: float,
     stage2_shared_lr: float,
+    stage2_sage_lr: Optional[float] = None,
     stage2_p3_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
@@ -79,10 +80,13 @@ def create_stage2_optimizer(
     Construct Stage-2 optimizer parameter groups according to SAGE-Lite protocol:
     - Shared experts (4 CNN expert main blocks): stage2_shared_lr
     - Base / Other modules (ViT expert blocks, Routers, SA-Hub, Decoder, Bridge/interface layers): stage2_base_lr
+    - SAGE routing/adaptation modules (Routers, SA-Hub, alpha) when stage2_sage_lr != stage2_base_lr: stage2_sage_lr
     - P3 refinement (ASDW / Generic DW weights + gamma): stage2_p3_lr
     - Each tier split into decay (weight_decay) and no_decay (0.0 for Norm/bias/gamma).
     - Partition assertions: 0 missing parameters, 0 duplicates.
     """
+    if stage2_sage_lr is None:
+        stage2_sage_lr = stage2_base_lr
     if stage2_p3_lr is None:
         stage2_p3_lr = stage2_base_lr
     if shared_prefixes is None:
@@ -93,6 +97,8 @@ def create_stage2_optimizer(
         'shared_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_shared_lr, 'name': 'shared_experts'},
         'others_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_base_lr, 'name': 'other_non_experts'},
         'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_non_experts'},
+        'sage_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_sage_lr, 'name': 'sage'},
+        'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_sage_lr, 'name': 'sage'},
         'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
         'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
     }
@@ -115,6 +121,8 @@ def create_stage2_optimizer(
             tier = 'p3'
         elif (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes):
             tier = 'shared'
+        elif ('router' in name or 'sa_hub' in name or 'alpha' in name) and (stage2_sage_lr != stage2_base_lr):
+            tier = 'sage'
         else:
             tier = 'others'
 
@@ -300,6 +308,8 @@ def main(args):
         config['stage2_base_lr'] = args.stage2_base_lr
     if getattr(args, 'stage2_shared_lr', None) is not None:
         config['stage2_shared_lr'] = args.stage2_shared_lr
+    if getattr(args, 'stage2_sage_lr', None) is not None:
+        config['stage2_sage_lr'] = args.stage2_sage_lr
     if getattr(args, 'stage2_p3_lr', None) is not None:
         config['stage2_p3_lr'] = args.stage2_p3_lr
     if getattr(args, 'patience', None) is not None:
@@ -743,16 +753,18 @@ def main(args):
             else:
                 stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
                 stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
+                stage2_sage_lr = float(getattr(args, 'stage2_sage_lr', None) or config.get("stage2_sage_lr", stage2_base_lr))
                 stage2_p3_lr = float(getattr(args, 'stage2_p3_lr', None) or config.get("stage2_p3_lr", p3_lr))
 
             logger.info(
                 f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, "
-                f"base_lr={stage2_base_lr:.2e}, p3_lr={stage2_p3_lr:.2e}"
+                f"base_lr={stage2_base_lr:.2e}, sage_lr={stage2_sage_lr:.2e}, p3_lr={stage2_p3_lr:.2e}"
             )
             optimizer = create_stage2_optimizer(
                 model,
                 stage2_base_lr=stage2_base_lr,
                 stage2_shared_lr=stage2_shared_lr,
+                stage2_sage_lr=stage2_sage_lr,
                 stage2_p3_lr=stage2_p3_lr,
             )
         else:
@@ -891,8 +903,11 @@ def main(args):
             if stage == 2:
                 sh_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), 0.0)
                 oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') in ('other_non_experts', 'other_and_routers')), 0.0)
+                sg_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
                 p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
                 lr_str = f"Shared={sh_lr:.2e}, Base={oth_lr:.2e}"
+                if sg_lr is not None:
+                    lr_str += f", SAGE={sg_lr:.2e}"
                 if p3_lr_cur is not None:
                     g0, g1 = get_p3_gamma_values(model)
                     lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
@@ -1043,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--initial-epochs-no-improve', type=int, default=0, help='Initial epochs without improvement counter for early stopping (e.g. 2 if resuming after 2 non-improving epochs)')
     parser.add_argument('--stage2-base-lr', type=float, default=None, help='Override stage2_base_lr')
     parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
+    parser.add_argument('--stage2-sage-lr', type=float, default=None, help='Override stage2_sage_lr')
     parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
     return parser
