@@ -27,6 +27,25 @@ from sage.networks import create_b0_unet, create_b1_unet, create_b2_unet
 from sage.utils.dataloader import get_dataset_from_config
 from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 
+try:
+    from scripts.stage2_utils import (
+        load_stage1_checkpoint_for_stage2,
+        resolve_stage2_rng_checkpoint,
+        load_stage2_rng_checkpoint,
+        restore_rng_states,
+        restore_scaler_state,
+        validate_checkpoint_compatibility,
+    )
+except ImportError:
+    from stage2_utils import (
+        load_stage1_checkpoint_for_stage2,
+        resolve_stage2_rng_checkpoint,
+        load_stage2_rng_checkpoint,
+        restore_rng_states,
+        restore_scaler_state,
+        validate_checkpoint_compatibility,
+    )
+
 DEFAULT_SHARED_PREFIXES = {
     "backbone.convnext.stages.0.main_block.",
     "backbone.convnext.stages.1.main_block.",
@@ -692,60 +711,16 @@ def main(args):
             g0, g1 = get_p3_gamma_values(model)
             logger.info(f"Stage 2 Extension learned gamma confirmed: S0={g0:.4f}, S1={g1:.4f}")
     elif is_stage2_only:
-        stage1_ckpt_path = generic_ckpt_path
-        if not stage1_ckpt_path:
-            stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
-        if not os.path.exists(stage1_ckpt_path):
-            logger.error(f"Cannot find Stage 1 checkpoint at {stage1_ckpt_path}")
-            sys.exit(1)
-        logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
-        stage1_data = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-        model.load_state_dict(stage1_data.get('model_state_dict', stage1_data))
-        global_best_dice = float(stage1_data.get('best_dice', 0.0))
-        global_best_loss = float(stage1_data.get('best_loss', float('inf')))
-
-        # Resolution for baseline best metrics if missing
-        if global_best_dice == 0.0 and getattr(args, 'best_dice', None) is None:
-            dirname = os.path.dirname(stage1_ckpt_path)
-            candidate_best = os.path.join(dirname, f"best_model_{model_type.lower()}_stage1.pth")
-            if os.path.exists(candidate_best) and candidate_best != stage1_ckpt_path:
-                try:
-                    best_meta = torch.load(candidate_best, map_location='cpu', weights_only=False)
-                    global_best_dice = float(best_meta.get('best_dice', 0.0))
-                    global_best_loss = float(best_meta.get('best_loss', float('inf')))
-                    logger.info(f"Loaded baseline best metrics from adjacent checkpoint {candidate_best}: Dice={global_best_dice:.4f}, Loss={global_best_loss:.4f}")
-                except Exception as e:
-                    logger.warning(f"Could not load metadata from {candidate_best}: {e}")
-
-        # Explicit CLI overrides take top precedence
-        if getattr(args, 'best_dice', None) is not None:
-            global_best_dice = float(args.best_dice)
-        if getattr(args, 'best_loss', None) is not None:
-            global_best_loss = float(args.best_loss)
-
-        if args.stage1_epochs_used is not None:
-            epochs_used_so_far = args.stage1_epochs_used
-            logger.info(f"Using explicitly provided --stage1-epochs-used: {epochs_used_so_far}")
-        else:
-            completion_file = os.path.join(os.path.dirname(stage1_ckpt_path), "stage1_completion.json")
-            if not os.path.exists(completion_file):
-                completion_file = os.path.join(output_dir, "stage1_completion.json")
-            if os.path.exists(completion_file):
-                try:
-                    with open(completion_file, 'r') as f:
-                        meta = json.load(f)
-                        epochs_used_so_far = meta.get('epochs_used', stage1_max)
-                    logger.info(f"Loaded actual Stage 1 epochs from {completion_file}: {epochs_used_so_far}")
-                except Exception as e:
-                    epochs_used_so_far = int(stage1_data.get('epoch', stage1_max))
-                    logger.warning(f"Could not read {completion_file} ({e}), falling back to checkpoint epoch: {epochs_used_so_far}")
-            else:
-                epochs_used_so_far = int(stage1_data.get('epoch', stage1_max))
-                logger.info(f"No stage1 completion file found; using Stage 1 checkpoint epoch: {epochs_used_so_far}")
-
-        logger.info(
-            f"Stage 2 starting from Stage 1: Global Best Dice={global_best_dice:.4f}, "
-            f"Global Best Loss={global_best_loss:.4f}, Stage 1 Epochs Used={epochs_used_so_far}"
+        stage1_data, global_best_dice, global_best_loss, epochs_used_so_far = load_stage1_checkpoint_for_stage2(
+            args=args,
+            config=config,
+            model=model,
+            device=device,
+            output_dir=output_dir,
+            model_type=model_type,
+            p3_mode=p3_mode,
+            stage1_max=stage1_max,
+            logger=logger,
         )
         if p3_mode is not None:
             g0, g1 = get_p3_gamma_values(model)
@@ -831,74 +806,20 @@ def main(args):
                 logger.warning(f"Could not restore scheduler state_dict: {e}")
 
         if is_stage2_extension and stage == 2:
-            if 'scaler_state_dict' in resume_data:
-                try:
-                    scaler.load_state_dict(resume_data['scaler_state_dict'])
-                    logger.info("Restored AMP scaler state_dict from checkpoint.")
-                except Exception as e:
-                    logger.warning(f"Could not restore scaler state_dict: {e}")
-
-            if 'rng_state' in resume_data and resume_data['rng_state'] is not None:
-                torch.set_rng_state(resume_data['rng_state'])
-            if torch.cuda.is_available() and resume_data.get('cuda_rng_state_all') is not None:
-                torch.cuda.set_rng_state_all(resume_data['cuda_rng_state_all'])
-            if resume_data.get('numpy_rng_state') is not None:
-                np.random.set_state(resume_data['numpy_rng_state'])
-            if resume_data.get('python_rng_state') is not None:
-                random.setstate(resume_data['python_rng_state'])
-            if 'dataloader_generator_state' in resume_data and resume_data['dataloader_generator_state'] is not None:
-                try:
-                    g.set_state(resume_data['dataloader_generator_state'])
-                    logger.info("Restored DataLoader generator state from checkpoint.")
-                except Exception as e:
-                    logger.warning(f"Could not restore DataLoader generator state: {e}")
+            restore_scaler_state(resume_data, scaler=scaler, logger=logger)
+            restore_rng_states(resume_data, generator=g, logger=logger)
 
         elif is_stage2_only and stage == 2:
-            rng_ckpt_path = getattr(args, 'rng_checkpoint', None) or config.get('rng_checkpoint')
-            if rng_ckpt_path is None:
-                candidates = []
-                if generic_ckpt_path:
-                    ckpt_dir = os.path.dirname(generic_ckpt_path)
-                    candidates.append(os.path.join(ckpt_dir, f"last_model_{model_type.lower()}_stage1.pth"))
-                candidates.append(os.path.join(output_dir, f"last_model_{model_type.lower()}_stage1.pth"))
-                for cand in candidates:
-                    if os.path.exists(cand):
-                        rng_ckpt_path = cand
-                        logger.info(f"Auto-detected Stage 1 RNG checkpoint: {rng_ckpt_path}")
-                        break
-
-            if rng_ckpt_path:
-                if not os.path.exists(rng_ckpt_path):
-                    logger.error(f"Cannot find specified RNG checkpoint: {rng_ckpt_path}")
-                    sys.exit(1)
-                logger.info(f"Restoring Stage 1 RNG and Scaler state from: {rng_ckpt_path}")
-                rng_data = torch.load(rng_ckpt_path, map_location='cpu', weights_only=False)
-
-                if 'scaler_state_dict' in rng_data:
-                    try:
-                        scaler.load_state_dict(rng_data['scaler_state_dict'])
-                        logger.info("Restored AMP scaler state_dict from Stage 1 RNG checkpoint.")
-                    except Exception as e:
-                        logger.warning(f"Could not restore scaler state_dict: {e}")
-
-                if 'rng_state' in rng_data and rng_data['rng_state'] is not None:
-                    torch.set_rng_state(rng_data['rng_state'])
-                    logger.info("Restored torch CPU RNG state.")
-                if torch.cuda.is_available() and rng_data.get('cuda_rng_state_all') is not None:
-                    torch.cuda.set_rng_state_all(rng_data['cuda_rng_state_all'])
-                    logger.info("Restored torch CUDA RNG state.")
-                if rng_data.get('numpy_rng_state') is not None:
-                    np.random.set_state(rng_data['numpy_rng_state'])
-                    logger.info("Restored NumPy RNG state.")
-                if rng_data.get('python_rng_state') is not None:
-                    random.setstate(rng_data['python_rng_state'])
-                    logger.info("Restored Python RNG state.")
-                if 'dataloader_generator_state' in rng_data and rng_data['dataloader_generator_state'] is not None:
-                    try:
-                        g.set_state(rng_data['dataloader_generator_state'])
-                        logger.info("Restored DataLoader generator state from Stage 1 RNG checkpoint.")
-                    except Exception as e:
-                        logger.warning(f"Could not restore DataLoader generator state: {e}")
+            rng_data = load_stage2_rng_checkpoint(
+                explicit_path=getattr(args, 'rng_checkpoint', None) or config.get('rng_checkpoint'),
+                model_type=model_type,
+                generic_ckpt_path=generic_ckpt_path,
+                output_dir=output_dir,
+                logger=logger,
+            )
+            if rng_data is not None:
+                restore_scaler_state(rng_data, scaler=scaler, logger=logger)
+                restore_rng_states(rng_data, generator=g, logger=logger)
                 logger.info("Stage 2 optimizer and scheduler maintained strictly fresh (no state restored from RNG checkpoint).")
             else:
                 logger.warning("No Stage 1 RNG checkpoint provided or auto-detected. Stage 2 will start with initial RNG state.")
