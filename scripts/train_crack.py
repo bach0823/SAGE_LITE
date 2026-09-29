@@ -71,7 +71,6 @@ def create_stage2_optimizer(
     model: nn.Module,
     stage2_base_lr: float,
     stage2_shared_lr: float,
-    stage2_fine_lr: Optional[float] = None,
     stage2_p3_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
@@ -1013,7 +1012,8 @@ def main(args):
             
         logger.info(f"Stage {stage} finished. Total epochs used so far: {epochs_used_so_far}/{total_budget}")
 
-if __name__ == '__main__':
+def build_parser() -> argparse.ArgumentParser:
+    """Build the official CLI argument parser for SAGE-Lite training."""
     parser = argparse.ArgumentParser(description='Train SAGE-Lite Models for Crack Segmentation')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
     parser.add_argument('--stage1-only', action='store_true', help='Run only Stage 1 in two-stage training and exit')
@@ -1045,6 +1045,11 @@ if __name__ == '__main__':
     parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
     parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
+    return parser
+
+
+if __name__ == '__main__':
+    parser = build_parser()
     args = parser.parse_args()
     main(args)
 

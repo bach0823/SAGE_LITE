@@ -141,23 +141,31 @@ def test_cli_and_config_resolution():
     assert sage_lr == 5e-5, f"Config explicit sage_lr failed: {sage_lr}"
     assert p3_lr == 2e-4, f"Config explicit p3_lr failed: {p3_lr}"
 
-    # 3. CLI parsing test for SAGE LR, P3 LR, Stage 2 Base/Shared LR
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=False)
-    parser.add_argument('--lr', type=float, default=None)
-    parser.add_argument('--sage-lr', '--sage_lr', type=float, default=None, dest='sage_lr')
-    parser.add_argument('--p3-lr', '--p3_lr', type=float, default=None, dest='p3_lr')
-    parser.add_argument('--stage2-base-lr', type=float, default=None)
-    parser.add_argument('--stage2-shared-lr', type=float, default=None)
+    # 3. CLI parsing test for SAGE LR, P3 LR, Stage 2 Base/Shared LR using real parser
+    from scripts.train_crack import build_parser
+    parser = build_parser()
 
-    args1 = parser.parse_args(['--sage-lr', '5e-5', '--stage2-shared-lr', '8e-5'])
-    assert args1.sage_lr == 5e-5
-    assert args1.stage2_shared_lr == 8e-5
-    args2 = parser.parse_args(['--sage_lr', '2e-4', '--stage2-base-lr', '1.5e-4'])
+    # Test real CLI parsing for valid Stage 2 and SAGE LR arguments
+    args1 = parser.parse_args(['--config', 'dummy.yaml', '--sage-lr', '5e-5', '--stage2-shared-lr', '8e-5', '--stage2-base-lr', '1e-4', '--p3-lr', '2e-4'])
+    assert args1.sage_lr == 5e-5, f"Real parser failed sage_lr: {args1.sage_lr}"
+    assert args1.stage2_shared_lr == 8e-5, f"Real parser failed stage2_shared_lr: {args1.stage2_shared_lr}"
+    assert args1.stage2_base_lr == 1e-4, f"Real parser failed stage2_base_lr: {args1.stage2_base_lr}"
+    assert args1.p3_lr == 2e-4, f"Real parser failed p3_lr: {args1.p3_lr}"
+
+    # Also test alternative flag aliases
+    args2 = parser.parse_args(['--config', 'dummy.yaml', '--sage_lr', '2e-4', '--p3_lr', '1.5e-4'])
     assert args2.sage_lr == 2e-4
-    assert args2.stage2_base_lr == 1.5e-4
+    assert args2.p3_lr == 1.5e-4
 
-    print("  --> PASS: CLI and config fallback logic verified.")
+    # Verify that removed flag --stage2-fine-lr is strictly rejected by the real parser!
+    try:
+        parser.parse_args(['--config', 'dummy.yaml', '--stage2-fine-lr', '1e-4'])
+        raised = False
+    except SystemExit:
+        raised = True
+    assert raised, "Real parser should reject removed flag '--stage2-fine-lr' with SystemExit!"
+
+    print("  --> PASS: Real CLI parser and config fallback logic verified.")
 
 
 def test_sage_lr_invariance_across_tiers():

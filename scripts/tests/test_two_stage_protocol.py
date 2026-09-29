@@ -98,20 +98,35 @@ def test_stage2_optimizer_partitioning():
             assert p in shared_set, f"A parameter of CNN stage {stage_idx} was NOT placed in shared_experts!"
         print(f"  [POSITIVE VERIFIED] All {len(params)} parameters of CNN Stage {stage_idx} main_block -> shared_experts")
 
-    # 4. Specific negative assertions: ViT blocks, routers, SA-Hub, decoder must NOT be in shared_set
-    negative_checks = [
+    # 4. Specific assertions for ViT experts (ExpertPool 4..N) -> other_non_experts
+    num_shared = 4
+    for exp_idx in range(num_shared, len(model.expert_pool)):
+        vit_expert = model.expert_pool[exp_idx]
+        vit_params = list(vit_expert.parameters())
+        assert len(vit_params) > 0, f"ViT expert {exp_idx} has no parameters!"
+        for p in vit_params:
+            assert p in other_set, f"Parameter of ViT expert {exp_idx} was not in other_non_experts!"
+            assert p not in shared_set, f"Parameter of ViT expert {exp_idx} leaked into shared_experts!"
+        print(f"  [ViT EXPERT VERIFIED] All {len(vit_params)} parameters of ViT Expert {exp_idx} -> other_non_experts")
+
+    # 5. Specific assertions for Routers, Bridge, and Decoder -> other_non_experts (no silent skips)
+    expected_non_expert_keys = [
         "backbone.convnext.stages.0.router.expert_keys",
-        "backbone.convnext.stages.0.alpha",
+        "backbone.convnext.stages.0.router.query_projection.weight",
+        "backbone.transformer_blocks.0.router.expert_keys",
+        "backbone.convnext_to_transformer.weight",
         "backbone.transformer_to_decoder.weight",
         "decoder.segmentation_head.0.weight",
+        "decoder.segmentation_head.3.weight",
     ]
     named_params = dict(model.named_parameters())
-    for key in negative_checks:
-        if key in named_params and named_params[key].requires_grad:
-            p = named_params[key]
-            assert p not in shared_set, f"Parameter {key} leaked into shared_experts!"
-            assert p in other_set, f"Parameter {key} was not in other_non_experts!"
-            print(f"  [NON-EXPERT VERIFIED] {key} -> other_non_experts")
+    for key in expected_non_expert_keys:
+        assert key in named_params, f"Required test parameter '{key}' not found in model named_parameters!"
+        p = named_params[key]
+        assert p.requires_grad, f"Parameter '{key}' should be trainable in Stage 2!"
+        assert p in other_set, f"Parameter '{key}' was not placed in other_non_experts!"
+        assert p not in shared_set, f"Parameter '{key}' leaked into shared_experts!"
+        print(f"  [NON-EXPERT VERIFIED] {key} -> other_non_experts")
 
     print("TEST 1 PASSED: Parameter partitioning across all tiers is strictly correct and disjoint!")
 
