@@ -1,0 +1,60 @@
+# ==============================================================================
+# SAGE-Lite B2 Proposal 3 (P3) Ablation Study — Phase 5.1 Candidate B (SAGE LR = 2e-4)
+# ==============================================================================
+# Role: Phase 5.1 SAGE LR Isolation — High Learning Rate Candidate
+# Architecture: D4 (4 CNN + 4 ViT = 8 experts), P3-C ASDW
+# Routing: top_k = 2 (25% pool capacity, provisional base)
+# Router: router_hidden_dim = 64 (best observed configuration)
+# Load Balance: load_balance_factor = 0.01 (inherited baseline, Phase 4 skipped)
+# Protocol: 35 epochs (Stage 1 = 17, Stage 2 = 18, patience = 6, BS14, img_size 448)
+# Optimization: Isolated SAGE LR = 2e-4 (Stage 1), Stage 2 preserved at canonical 1e-4
+# ==============================================================================
+
+model: B2
+num_transformer_layers: 4
+p3_mode: "C"
+seed: 42
+img_size: 448
+batch_size: 14
+num_workers: 2
+epochs: 35
+stage1_epochs: 17
+warmup_epochs: 3
+patience: 6
+two_stage: true
+lr: 1e-4
+sage_lr: 2e-4
+p3_lr: 1e-4
+gamma_init: 0.01
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
+stage2_p3_lr: 1e-4
+output_dir: "/content/drive/MyDrive/crack_seg/P3_C_Canonical_Base_D4_K2_H64_Phase5_SAGELR2e-4"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+sage_config:
+  top_k: 2
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+  fusion_type: "residual"
+  residual_scale: 0.1
+
+root_dir: "/content/dataset/Crack500"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"
