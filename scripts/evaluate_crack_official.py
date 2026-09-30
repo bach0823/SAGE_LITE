@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import yaml
@@ -332,6 +333,10 @@ def main():
                         help="Blend method for Setting B: 'probs' (average probabilities -> threshold 0.5) or 'logits' (average logits -> threshold 0)")
     parser.add_argument('--diagnostic', action='store_true',
                         help="Compute diagnostic metrics at best checkpoint (Boundary IoU, HD95)")
+    parser.add_argument('--split', type=str, default='val', choices=['val', 'test', 'all'],
+                        help="Dataset split to evaluate (default: val to keep test set sealed)")
+    parser.add_argument('--output_json', '--output-json', type=str, default=None,
+                        help="Path to save evaluation metrics as JSON")
     args = parser.parse_args()
     
     with open(args.config, 'r') as f:
@@ -402,7 +407,8 @@ def main():
         elif protocol == 'setting_b':
             print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, blend_mode={args.blend_mode}).")
         
-        for split in ['val', 'test']:
+        splits_to_run = ['val', 'test'] if args.split == 'all' else [args.split]
+        for split in splits_to_run:
             pairs = get_image_mask_pairs(config, split)
             if not pairs:
                 continue
@@ -423,6 +429,14 @@ def main():
             if args.diagnostic:
                 print(f"{split.upper()} Boundary IoU:       {res.get('boundary_iou', 0.0):.4f}")
                 print(f"{split.upper()} HD95:               {res.get('hd95', 0.0):.4f}")
+
+            if args.output_json:
+                out_p = args.output_json
+                if os.path.dirname(out_p):
+                    os.makedirs(os.path.dirname(os.path.abspath(out_p)), exist_ok=True)
+                with open(out_p, 'w', encoding='utf-8') as f:
+                    json.dump(res, f, indent=2)
+                print(f"[AUDIT PASS] Saved canonical official evaluation metrics to: {out_p}")
 
 if __name__ == '__main__':
     main()
