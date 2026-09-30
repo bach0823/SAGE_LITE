@@ -327,17 +327,28 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for tiling inference")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--force-rerun", action="store_true", help="Force re-run even if final test output exists")
+    parser.add_argument("--rerun-reason", type=str, default=None, help="Mandatory justification reason if --force-rerun is used")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     final_json_path = os.path.join(args.output_dir, "final_test_metrics.json")
-    if os.path.exists(final_json_path) and not args.force_rerun:
-        logger.error(
-            f"PRE-REGISTRATION LOCK ENGAGED: '{final_json_path}' already exists! "
-            "To prevent multiple testing bias on the Test set, re-evaluating is blocked. "
-            "Pass --force-rerun only if this is an intentional audit re-run."
-        )
-        sys.exit(1)
+    audit_log_path = os.path.join(args.output_dir, "test_evaluation_audit_trail.log")
+
+    is_rerun = os.path.exists(final_json_path)
+    if is_rerun:
+        if not args.force_rerun:
+            logger.error(
+                f"PRE-REGISTRATION LOCK ENGAGED: '{final_json_path}' already exists! "
+                "To prevent multiple testing bias on the Test set, re-evaluating is blocked. "
+                "To execute an intentional re-run, both --force-rerun and --rerun-reason '<justification>' are strictly required."
+            )
+            sys.exit(1)
+        if not args.rerun_reason or len(args.rerun_reason.strip()) < 5:
+            logger.error(
+                "AUDIT INTEGRITY VIOLATION: --force-rerun was supplied without a valid --rerun-reason! "
+                "You must document a clear justification for re-evaluating the pristine Test set."
+            )
+            sys.exit(1)
 
     device = torch.device(args.device)
     if device.type == "cuda":
@@ -355,10 +366,10 @@ def main():
     model, ckpt_meta = load_model(config, args.checkpoint, device)
 
     # 3. Evaluate Setting A and Setting B
-    logger.info("Executing Setting A (Official Non-Overlapping Tiling)...")
+    logger.info("Executing Primary Official Protocol: Setting A (Non-Overlapping Tiling)...")
     summary_a, samples_a = evaluate_protocol(model, test_pairs, "setting_a", device, tile_size=config.get("img_size", 448), batch_size=args.batch_size)
 
-    logger.info("Executing Setting B (Official 50% Overlapping Tiling)...")
+    logger.info("Executing Secondary Reference Protocol: Setting B (50% Overlapping Tiling)...")
     summary_b, samples_b = evaluate_protocol(model, test_pairs, "setting_b", device, tile_size=config.get("img_size", 448), batch_size=args.batch_size)
 
     # 4. Save Final Machine-Readable JSON
@@ -367,6 +378,8 @@ def main():
             "model": config.get("model", "B2"),
             "p3_mode": config.get("p3_mode", None),
             "vit_depth": config.get("num_transformer_layers", 4),
+            "primary_official_protocol": "setting_a",
+            "secondary_reference_protocol": "setting_b",
             "config": os.path.abspath(args.config),
             "checkpoint": os.path.abspath(args.checkpoint),
             "checkpoint_metadata": {
@@ -377,7 +390,8 @@ def main():
             },
             "timestamp": datetime.datetime.now().isoformat(),
             "total_test_samples": len(test_pairs),
-            "evaluation_guard": "SINGLE_SHOT_OFFICIAL_TEST",
+            "evaluation_guard": "FORCE_RERUN" if is_rerun else "INITIAL_RUN",
+            "rerun_reason": args.rerun_reason if is_rerun else None,
             "preregistration_invariants": {
                 "threshold": 0.5,
                 "tta": False,
@@ -385,13 +399,27 @@ def main():
                 "setting_b_stride": 224,
             },
         },
-        "setting_a": summary_a,
-        "setting_b": summary_b,
+        "setting_a_official": summary_a,
+        "setting_b_reference": summary_b,
     }
 
     with open(final_json_path, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=2)
     logger.info(f"Saved final test metrics to: {final_json_path}")
+
+    # Write to Audit Trail Log
+    audit_entry = (
+        f"[{datetime.datetime.now().isoformat()}] EVENT: {'FORCE_RERUN' if is_rerun else 'INITIAL_RUN'}\n"
+        f"  Checkpoint: {os.path.abspath(args.checkpoint)}\n"
+        f"  Config:     {os.path.abspath(args.config)}\n"
+        f"  Reason:     {args.rerun_reason if is_rerun else 'Official Preregistered First Execution'}\n"
+        f"  Results (Setting A): Dice={summary_a['mean_dice']:.4f}, IoU={summary_a['mean_iou']:.4f}, Boundary_IoU={summary_a['mean_boundary_iou']:.4f}\n"
+        f"  Results (Setting B): Dice={summary_b['mean_dice']:.4f}, IoU={summary_b['mean_iou']:.4f}, Boundary_IoU={summary_b['mean_boundary_iou']:.4f}\n"
+        "--------------------------------------------------------------------------------\n"
+    )
+    with open(audit_log_path, "a", encoding="utf-8") as f:
+        f.write(audit_entry)
+    logger.info(f"Appended audit trail entry to: {audit_log_path}")
 
     # 5. Save Per-Sample CSV
     csv_path = os.path.join(args.output_dir, "final_test_per_sample.csv")
