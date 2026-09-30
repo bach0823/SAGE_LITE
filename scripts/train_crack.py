@@ -430,6 +430,7 @@ def main(args):
     elif model_type == 'B2':
         vit_depth = int(config.get('num_transformer_layers', 12))
         sage_cfg = config.get('sage_config', {})
+        use_plu_head = config.get('use_plu_head', False)
         model = create_b2_unet(
             num_classes=1,
             img_size=img_size,
@@ -437,8 +438,9 @@ def main(args):
             pretrained=True,
             sage_config=sage_cfg,
             p3_mode=p3_mode,
+            use_plu_head=use_plu_head,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, and p3_mode='{p3_mode}'")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
 
@@ -798,9 +800,11 @@ def main(args):
             if not is_stage2_extension and not is_stage2_only:
                 stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
                 if os.path.exists(stage1_ckpt_path):
-                    logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
-                    checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-                    model.load_state_dict(checkpoint['model_state_dict'])
+                    ckpt_sd = checkpoint.get('model_state_dict', checkpoint)
+                    if hasattr(model, 'load_stage1_state_dict'):
+                        model.load_stage1_state_dict(ckpt_sd)
+                    else:
+                        model.load_state_dict(ckpt_sd)
                 else:
                     logger.warning(f"Stage 1 checkpoint not found at {stage1_ckpt_path}. Proceeding anyway...")
 

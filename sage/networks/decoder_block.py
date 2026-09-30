@@ -108,6 +108,79 @@ class DecoderBlock(nn.Module):
         return x
 
 
+class ProgressiveLearnedUpsamplingHead(nn.Module):
+    """
+    Progressive Learned Upsampling Head (PLU-Head) for Phase 6-A.2 Representation Probe.
+
+    Replaces the non-parametric 4x bilinear interpolation with two progressive
+    transposed convolution stages:
+      48x112^2 -> Conv3x3 (48->24) -> BN/ReLU -> ConvTranspose2d (24->16, k=4, s=2, p=1, bias=False)
+      -> BN/ReLU -> ConvTranspose2d (16->num_classes, k=4, s=2, p=1, bias=True) -> 448^2.
+
+    Cấu hình kernel=4, stride=2 có overlap đều theo không gian và được sử dụng để giảm nguy cơ
+    checkerboard artifact; không coi việc loại bỏ artifact là một giả định đã được chứng minh.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 48,
+        mid_channels: int = 24,
+        up_channels: int = 16,
+        num_classes: int = 1,
+        use_dwsc: bool = False,
+    ):
+        super().__init__()
+        self.conv112 = make_conv3x3(in_channels, mid_channels, use_dwsc=use_dwsc)
+        self.norm112 = nn.BatchNorm2d(mid_channels)
+        self.act112 = nn.ReLU(inplace=True)
+
+        self.up224 = nn.ConvTranspose2d(
+            mid_channels,
+            up_channels,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=False,
+        )
+        self.norm224 = nn.BatchNorm2d(up_channels)
+        self.act224 = nn.ReLU(inplace=True)
+
+        self.up448 = nn.ConvTranspose2d(
+            up_channels,
+            num_classes,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=True,
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.kaiming_normal_(self.up224.weight, mode="fan_out", nonlinearity="relu")
+        nn.init.ones_(self.norm224.weight)
+        nn.init.zeros_(self.norm224.bias)
+        nn.init.kaiming_normal_(self.up448.weight, mode="fan_out", nonlinearity="linear")
+        nn.init.zeros_(self.up448.bias)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        target_size: Optional[Tuple[int, int]] = (448, 448),
+    ) -> torch.Tensor:
+        x = self.act112(self.norm112(self.conv112(x)))
+        x = self.act224(self.norm224(self.up224(x)))
+        logits = self.up448(x)
+
+        if target_size is not None and logits.shape[2:] != target_size:
+            logits = F.interpolate(
+                logits,
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return logits
+
+
 class UNetDecoder(nn.Module):
     """
     Full UNet Decoder for SAGE-Lite.
@@ -126,6 +199,7 @@ class UNetDecoder(nn.Module):
         encoder_channels (List[int]): Channels of the 4 encoder stages (default: [48, 96, 192, 384]).
         num_classes (int): Number of segmentation classes (default: 1 for crack).
         use_dwsc (bool): Whether to use Depthwise Separable Convolutions (default: False).
+        use_plu_head (bool): Whether to use Progressive Learned Upsampling Head (default: False).
     """
 
     def __init__(
@@ -133,11 +207,13 @@ class UNetDecoder(nn.Module):
         encoder_channels: List[int] = [48, 96, 192, 384],
         num_classes: int = 1,
         use_dwsc: bool = False,
+        use_plu_head: bool = False,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
         self.num_classes = num_classes
         self.use_dwsc = use_dwsc
+        self.use_plu_head = use_plu_head
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
@@ -165,12 +241,21 @@ class UNetDecoder(nn.Module):
         final_channels = reversed_channels[-1]  # 48
         head_mid_channels = max(final_channels // 2, 16)  # 24
 
-        self.segmentation_head = nn.Sequential(
-            make_conv3x3(final_channels, head_mid_channels, use_dwsc=use_dwsc),
-            nn.BatchNorm2d(head_mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(head_mid_channels, num_classes, kernel_size=1),
-        )
+        if self.use_plu_head:
+            self.segmentation_head = ProgressiveLearnedUpsamplingHead(
+                in_channels=final_channels,
+                mid_channels=head_mid_channels,
+                up_channels=16,
+                num_classes=num_classes,
+                use_dwsc=use_dwsc,
+            )
+        else:
+            self.segmentation_head = nn.Sequential(
+                make_conv3x3(final_channels, head_mid_channels, use_dwsc=use_dwsc),
+                nn.BatchNorm2d(head_mid_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(head_mid_channels, num_classes, kernel_size=1),
+            )
 
     def forward(
         self,
@@ -204,17 +289,20 @@ class UNetDecoder(nn.Module):
             skip = reversed_skips[i]
             x_dec = block(x_dec, skip)
 
-        # Apply segmentation head: (B, 48, 112, 112) -> (B, num_classes, 112, 112)
-        logits = self.segmentation_head(x_dec)
+        if self.use_plu_head:
+            logits = self.segmentation_head(x_dec, target_size=target_size)
+        else:
+            # Apply segmentation head: (B, 48, 112, 112) -> (B, num_classes, 112, 112)
+            logits = self.segmentation_head(x_dec)
 
-        # Bilinear 4x upsampling to match input resolution (448, 448)
-        if target_size is not None and logits.shape[2:] != target_size:
-            logits = F.interpolate(
-                logits,
-                size=target_size,
-                mode="bilinear",
-                align_corners=False,
-            )
+            # Bilinear 4x upsampling to match input resolution (448, 448)
+            if target_size is not None and logits.shape[2:] != target_size:
+                logits = F.interpolate(
+                    logits,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
 
         return logits
 

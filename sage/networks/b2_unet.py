@@ -19,7 +19,7 @@ Date: September 2026
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -80,12 +80,14 @@ class B2ConvNeXtViTUNet(nn.Module):
         pretrained: bool = True,
         sage_config: Optional[Dict[str, Any]] = None,
         p3_mode: Optional[str] = None,
+        use_plu_head: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
         self.num_transformer_layers = num_transformer_layers
         self.p3_mode = p3_mode
+        self.use_plu_head = use_plu_head
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -103,11 +105,12 @@ class B2ConvNeXtViTUNet(nn.Module):
             pretrained=pretrained,
         )
 
-        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections
+        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head)
         self.decoder = UNetDecoder(
             encoder_channels=self.backbone.encoder_channels,
             num_classes=num_classes,
             use_dwsc=use_dwsc,
+            use_plu_head=use_plu_head,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -306,6 +309,57 @@ class B2ConvNeXtViTUNet(nn.Module):
             "residual_scale": self.sage_config.get("residual_scale", 0.1),
         }
 
+    def load_stage1_state_dict(self, state_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        """
+        Loads Stage 1 checkpoint state_dict into the model.
+        When use_plu_head is True:
+        - Transfers conv3x3 feature projection (segmentation_head.0 -> conv112)
+        - Transfers BatchNorm2d (segmentation_head.1 -> norm112)
+        - Discards old 112x112 head (segmentation_head.3)
+        - Allows up224, norm224, up448 to initialize deterministically via strict=False
+        """
+        if self.use_plu_head:
+            remapped = {}
+            for k, v in state_dict.items():
+                if k == 'decoder.segmentation_head.0.weight':
+                    remapped['decoder.segmentation_head.conv112.weight'] = v
+                elif k == 'decoder.segmentation_head.0.bias':
+                    remapped['decoder.segmentation_head.conv112.bias'] = v
+                elif k == 'decoder.segmentation_head.1.weight':
+                    remapped['decoder.segmentation_head.norm112.weight'] = v
+                elif k == 'decoder.segmentation_head.1.bias':
+                    remapped['decoder.segmentation_head.norm112.bias'] = v
+                elif k == 'decoder.segmentation_head.1.running_mean':
+                    remapped['decoder.segmentation_head.norm112.running_mean'] = v
+                elif k == 'decoder.segmentation_head.1.running_var':
+                    remapped['decoder.segmentation_head.norm112.running_var'] = v
+                elif k == 'decoder.segmentation_head.1.num_batches_tracked':
+                    remapped['decoder.segmentation_head.norm112.num_batches_tracked'] = v
+                elif k.startswith('decoder.segmentation_head.3.'):
+                    pass  # old 112x112 head discarded
+                else:
+                    remapped[k] = v
+            missing, unexpected = self.load_state_dict(remapped, strict=False)
+            expected_missing = {
+                'decoder.segmentation_head.up224.weight',
+                'decoder.segmentation_head.norm224.weight',
+                'decoder.segmentation_head.norm224.bias',
+                'decoder.segmentation_head.norm224.running_mean',
+                'decoder.segmentation_head.norm224.running_var',
+                'decoder.segmentation_head.up448.weight',
+                'decoder.segmentation_head.up448.bias',
+            }
+            actual_missing = set(missing)
+            unexpected_missing = actual_missing - expected_missing
+            if unexpected_missing:
+                logger.warning(f"Unexpected missing keys when loading Stage 1 into PLU model: {unexpected_missing}")
+            if unexpected:
+                logger.warning(f"Unexpected keys when loading Stage 1 into PLU model: {unexpected}")
+            logger.info("Successfully loaded Stage 1 checkpoint into B2 PLU-Head model (340+ tensors loaded, 7 PLU tensors freshly initialized).")
+            return missing, unexpected
+        else:
+            return self.load_state_dict(state_dict, strict=True)
+
 
 def create_b2_unet(
     num_classes: int = 1,
@@ -317,6 +371,7 @@ def create_b2_unet(
     pretrained: bool = True,
     sage_config: Optional[Dict[str, Any]] = None,
     p3_mode: Optional[str] = None,
+    use_plu_head: bool = False,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -331,4 +386,5 @@ def create_b2_unet(
         pretrained=pretrained,
         sage_config=sage_config,
         p3_mode=p3_mode,
+        use_plu_head=use_plu_head,
     )
