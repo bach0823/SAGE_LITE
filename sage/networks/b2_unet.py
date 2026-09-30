@@ -311,54 +311,45 @@ class B2ConvNeXtViTUNet(nn.Module):
 
     def load_stage1_state_dict(self, state_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """
-        Loads Stage 1 checkpoint state_dict into the model.
-        When use_plu_head is True:
-        - Transfers conv3x3 feature projection (segmentation_head.0 -> conv112)
-        - Transfers BatchNorm2d (segmentation_head.1 -> norm112)
-        - Discards old 112x112 head (segmentation_head.3)
-        - Allows up224, norm224, up448 to initialize deterministically via strict=False
+        Loads Stage 1 checkpoint state_dict into the model for Stage 2 joint training.
+
+        - For baseline B2 model (use_plu_head is False):
+          Strict loading of canonical Stage 1 checkpoint.
+        - For Phase 6-A.2 Pure PLU model (use_plu_head is True):
+          Strict loading of A2's own Stage 1 PLU checkpoint (trained from scratch).
+          All tensors (backbone, SAGE, decoder, conv112, norm112, up224, norm224, up448) must match strictly.
+          Safeguard: If a legacy baseline checkpoint (containing 'decoder.segmentation_head.0.*' or
+          'decoder.segmentation_head.3.*') is provided, raises ValueError to prevent accidental
+          cross-lineage contamination or uninitialized upsampling head gradient shocks.
         """
         if self.use_plu_head:
-            remapped = {}
-            for k, v in state_dict.items():
-                if k == 'decoder.segmentation_head.0.weight':
-                    remapped['decoder.segmentation_head.conv112.weight'] = v
-                elif k == 'decoder.segmentation_head.0.bias':
-                    remapped['decoder.segmentation_head.conv112.bias'] = v
-                elif k == 'decoder.segmentation_head.1.weight':
-                    remapped['decoder.segmentation_head.norm112.weight'] = v
-                elif k == 'decoder.segmentation_head.1.bias':
-                    remapped['decoder.segmentation_head.norm112.bias'] = v
-                elif k == 'decoder.segmentation_head.1.running_mean':
-                    remapped['decoder.segmentation_head.norm112.running_mean'] = v
-                elif k == 'decoder.segmentation_head.1.running_var':
-                    remapped['decoder.segmentation_head.norm112.running_var'] = v
-                elif k == 'decoder.segmentation_head.1.num_batches_tracked':
-                    remapped['decoder.segmentation_head.norm112.num_batches_tracked'] = v
-                elif k.startswith('decoder.segmentation_head.3.'):
-                    pass  # old 112x112 head discarded
-                else:
-                    remapped[k] = v
-            missing, unexpected = self.load_state_dict(remapped, strict=False)
-            expected_missing = {
-                'decoder.segmentation_head.up224.weight',
-                'decoder.segmentation_head.norm224.weight',
-                'decoder.segmentation_head.norm224.bias',
-                'decoder.segmentation_head.norm224.running_mean',
-                'decoder.segmentation_head.norm224.running_var',
-                'decoder.segmentation_head.up448.weight',
-                'decoder.segmentation_head.up448.bias',
-            }
-            actual_missing = set(missing)
-            unexpected_missing = actual_missing - expected_missing
-            if unexpected_missing:
-                logger.warning(f"Unexpected missing keys when loading Stage 1 into PLU model: {unexpected_missing}")
-            if unexpected:
-                logger.warning(f"Unexpected keys when loading Stage 1 into PLU model: {unexpected}")
-            logger.info("Successfully loaded Stage 1 checkpoint into B2 PLU-Head model (340+ tensors loaded; up224, norm224, up448 freshly initialized).")
+            has_baseline_keys = any(
+                k.startswith('decoder.segmentation_head.0.') or k.startswith('decoder.segmentation_head.3.')
+                for k in state_dict.keys()
+            )
+            if has_baseline_keys:
+                raise ValueError(
+                    "FATAL: Attempted to load a legacy baseline checkpoint into Phase 6-A.2 Pure PLU model! "
+                    "Phase 6-A.2 is a Pure PLU Representation Probe trained from scratch through full "
+                    "Stage 1 -> Stage 2. Baseline checkpoint reuse and head remapping are strictly prohibited."
+                )
+
+            has_plu_keys = (
+                'decoder.segmentation_head.up448.weight' in state_dict
+                and 'decoder.segmentation_head.conv112.weight' in state_dict
+            )
+            if not has_plu_keys:
+                raise ValueError(
+                    "FATAL: Checkpoint does not match canonical B2 PLU architecture schema! "
+                    "Expected 'decoder.segmentation_head.up448.weight' and 'decoder.segmentation_head.conv112.weight'."
+                )
+
+            missing, unexpected = self.load_state_dict(state_dict, strict=True)
+            logger.info("Successfully loaded Stage 1 PLU checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
             return missing, unexpected
         else:
-            return self.load_state_dict(state_dict, strict=True)
+            missing, unexpected = self.load_state_dict(state_dict, strict=True)
+            return missing, unexpected
 
 
 def create_b2_unet(
