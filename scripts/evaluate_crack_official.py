@@ -350,8 +350,15 @@ def main():
     elif model_type == 'B2':
         vit_depth = int(config.get('num_transformer_layers', 12))
         sage_cfg = config.get('sage_config', {})
-        model = create_b2_unet(num_transformer_layers=vit_depth, pretrained=False, sage_config=sage_cfg).to(device)
-        print(f"Loaded B2 architecture with {vit_depth} ViT blocks and SAGE components")
+        use_plu_head = config.get('use_plu_head', False)
+        model = create_b2_unet(
+            num_transformer_layers=vit_depth,
+            pretrained=False,
+            sage_config=sage_cfg,
+            p3_mode=config.get('p3_mode'),
+            use_plu_head=use_plu_head,
+        ).to(device)
+        print(f"Loaded B2 architecture with {vit_depth} ViT blocks, SAGE components, and use_plu_head={use_plu_head}")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         

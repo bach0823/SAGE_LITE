@@ -418,12 +418,15 @@ def main():
     img_size = int(model_cfg.get("img_size", 448))
     sage_cfg = model_cfg.get("sage_config", {})
 
-    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size}, top_k={sage_cfg.get('top_k', 4)})...")
+    use_plu_head = model_cfg.get("use_plu_head", False)
+
+    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size}, top_k={sage_cfg.get('top_k', 4)}, use_plu_head={use_plu_head})...")
     model = create_b2_unet(
         num_transformer_layers=num_layers,
         p3_mode=p3_mode,
         img_size=img_size,
         sage_config=sage_cfg,
+        use_plu_head=use_plu_head,
     ).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
