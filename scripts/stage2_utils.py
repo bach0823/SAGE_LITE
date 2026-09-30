@@ -73,6 +73,8 @@ def load_stage1_checkpoint_for_stage2(
 
     if logger:
         logger.info(f"Loading Stage 1 checkpoint for --stage2-only: {stage1_ckpt_path}")
+    stage1_data = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
+    warn_checkpoint_compatibility(stage1_data, model_type, p3_mode, logger)
     stage1_sd = stage1_data.get('model_state_dict', stage1_data)
     if hasattr(model, 'load_stage1_state_dict'):
         model.load_stage1_state_dict(stage1_sd)

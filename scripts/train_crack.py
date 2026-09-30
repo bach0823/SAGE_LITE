@@ -800,6 +800,8 @@ def main(args):
             if not is_stage2_extension and not is_stage2_only:
                 stage1_ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage1.pth")
                 if os.path.exists(stage1_ckpt_path):
+                    logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
+                    checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
                     ckpt_sd = checkpoint.get('model_state_dict', checkpoint)
                     if hasattr(model, 'load_stage1_state_dict'):
                         model.load_stage1_state_dict(ckpt_sd)
