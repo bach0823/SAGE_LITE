@@ -122,9 +122,9 @@ def load_stage1_checkpoint_for_stage2(
                 if logger:
                     logger.warning(f"Could not read {completion_file} ({e}), falling back to checkpoint epoch: {epochs_used_so_far}")
         else:
-            epochs_used_so_far = int(stage1_data.get('epoch', stage1_max))
+            epochs_used_so_far = stage1_max
             if logger:
-                logger.info(f"No stage1 completion file found; using Stage 1 checkpoint epoch: {epochs_used_so_far}")
+                logger.info(f"No stage1 completion file found; defaulting to full Stage 1 budget (stage1_epochs={stage1_max})")
 
     if logger:
         logger.info(
