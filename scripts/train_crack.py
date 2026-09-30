@@ -919,8 +919,7 @@ def main(args):
                 if sg_lr is not None:
                     lr_str += f", SAGE={sg_lr:.2e}"
                 if p3_lr_cur is not None:
-                    g0, g1 = get_p3_gamma_values(model)
-                    lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
+                    lr_str += f", P3={p3_lr_cur:.2e}"
             else:
                 bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
                 dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
