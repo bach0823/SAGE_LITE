@@ -359,6 +359,12 @@ def main():
             use_plu_head=use_plu_head,
         ).to(device)
         print(f"Loaded B2 architecture with {vit_depth} ViT blocks, SAGE components, and use_plu_head={use_plu_head}")
+        if use_plu_head:
+            from sage.networks.decoder_block import ProgressiveLearnedUpsamplingHead
+            assert model.use_plu_head is True, "model.use_plu_head is not True!"
+            assert isinstance(model.decoder.segmentation_head, ProgressiveLearnedUpsamplingHead), \
+                f"Expected ProgressiveLearnedUpsamplingHead, got {type(model.decoder.segmentation_head)}"
+            print("[AUDIT PASS] Verified model is equipped with ProgressiveLearnedUpsamplingHead.")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
         

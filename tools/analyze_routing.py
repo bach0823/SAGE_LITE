@@ -296,6 +296,13 @@ def load_model_from_checkpoint(
         use_plu_head=use_plu_head,
     ).to(device)
 
+    if use_plu_head:
+        from sage.networks.decoder_block import ProgressiveLearnedUpsamplingHead
+        assert model.use_plu_head is True, "model.use_plu_head is not True!"
+        assert isinstance(model.decoder.segmentation_head, ProgressiveLearnedUpsamplingHead), \
+            f"Expected ProgressiveLearnedUpsamplingHead, got {type(model.decoder.segmentation_head)}"
+        logger.info("[AUDIT PASS] Verified model is equipped with ProgressiveLearnedUpsamplingHead.")
+
     # 1. Checkpoint existence & SHA256 verification
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
