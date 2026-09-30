@@ -250,13 +250,58 @@ class ConstantLRScheduler:
             g['lr'] = self.lr
 
 
+class SoftBoundaryIoULoss(torch.nn.Module):
+    """
+    Differentiable Soft Boundary IoU Loss for crack segmentation.
+    Extracts boundary masks via morphological erosion (min-pooling)
+    and computes the soft intersection-over-union between predicted
+    and ground-truth boundary bands.
+    """
+    def __init__(self, dilation=2, smooth=1e-5):
+        super().__init__()
+        self.dilation = int(dilation)
+        self.kernel_size = 2 * self.dilation + 1
+        self.smooth = smooth
+
+    def _get_boundary(self, x):
+        # x is (B, 1, H, W) in [0, 1]
+        # Differentiable erosion: 1 - maxpool(1 - x)
+        eroded = 1.0 - torch.nn.functional.max_pool2d(
+            1.0 - x,
+            kernel_size=self.kernel_size,
+            stride=1,
+            padding=self.dilation
+        )
+        return torch.nn.functional.relu(x - eroded)
+
+    def forward(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+        probs = torch.sigmoid(logits)
+
+        b_pred = self._get_boundary(probs)
+        with torch.no_grad():
+            b_gt = self._get_boundary(targets)
+
+        intersection = (b_pred * b_gt).sum(dim=(2, 3))
+        union = (b_pred + b_gt - b_pred * b_gt).sum(dim=(2, 3))
+        boundary_iou = (intersection + self.smooth) / (union + self.smooth)
+        return 1.0 - boundary_iou.mean()
+
+
 class CrackBinaryLoss(torch.nn.Module):
-    def __init__(self, bce_weight=1.0, dice_weight=1.5, smooth=1e-5):
+    def __init__(self, bce_weight=1.0, dice_weight=1.5, boundary_weight=0.0, boundary_dilation=2, smooth=1e-5):
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
+        self.boundary_weight = boundary_weight
         self.smooth = smooth
         self.bce = torch.nn.BCEWithLogitsLoss()
+        if self.boundary_weight > 0.0:
+            self.boundary_loss = SoftBoundaryIoULoss(dilation=boundary_dilation, smooth=smooth)
+        else:
+            self.boundary_loss = None
 
     def forward(self, logits, targets):
         if targets.dim() == 3:
@@ -271,7 +316,12 @@ class CrackBinaryLoss(torch.nn.Module):
         dice_score = (2.0 * intersection + self.smooth) / (union + self.smooth)
         dice_loss = 1.0 - dice_score.mean()
         
-        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        total_loss = self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        if self.boundary_loss is not None:
+            b_loss = self.boundary_loss(logits, targets)
+            total_loss = total_loss + self.boundary_weight * b_loss
+
+        return total_loss
 
 def calculate_binary_metrics(probs, targets, threshold=0.5):
     preds = (probs > threshold).float()
@@ -436,7 +486,16 @@ def main(args):
             g0, g1 = get_p3_gamma_values(model)
             logger.info(f"P3 Refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
 
-    criterion = CrackBinaryLoss()
+    boundary_iou_weight = float(config.get('boundary_iou_weight', 0.0))
+    boundary_iou_dilation = int(config.get('boundary_iou_dilation', 2))
+    criterion = CrackBinaryLoss(
+        bce_weight=1.0,
+        dice_weight=1.5,
+        boundary_weight=boundary_iou_weight,
+        boundary_dilation=boundary_iou_dilation,
+    )
+    if boundary_iou_weight > 0.0:
+        logger.info(f"Boundary IoU Loss enabled: weight={boundary_iou_weight}, dilation={boundary_iou_dilation}")
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     base_lr = float(config.get('lr', 1e-4))
