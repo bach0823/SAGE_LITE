@@ -355,7 +355,7 @@ class B2ConvNeXtViTUNet(nn.Module):
                 logger.warning(f"Unexpected missing keys when loading Stage 1 into PLU model: {unexpected_missing}")
             if unexpected:
                 logger.warning(f"Unexpected keys when loading Stage 1 into PLU model: {unexpected}")
-            logger.info("Successfully loaded Stage 1 checkpoint into B2 PLU-Head model (340+ tensors loaded, 7 PLU tensors freshly initialized).")
+            logger.info("Successfully loaded Stage 1 checkpoint into B2 PLU-Head model (340+ tensors loaded; up224, norm224, up448 freshly initialized).")
             return missing, unexpected
         else:
             return self.load_state_dict(state_dict, strict=True)

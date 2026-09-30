@@ -122,7 +122,7 @@ def test_stage1_checkpoint_resumption():
     actual_missing = set(missing)
     diff = actual_missing - expected_missing
     assert len(diff) == 0, f"Unexpected missing keys: {diff}"
-    print(f"  [PASS] Missing keys are strictly the 7 new PLU-Head tensors: {len(actual_missing)} keys")
+    print(f"  [PASS] Missing state_dict keys are strictly the new upsampling tensors (up224, norm224, up448): {len(actual_missing)} keys")
     print(f"  [PASS] 100% of 340+ backbone, router, SA-Hub, and decoder block tensors successfully restored!")
 
 
