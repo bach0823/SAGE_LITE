@@ -117,9 +117,33 @@ def test_3_amp_fp16_stability():
     print(f"[PASS] Preflight 3: AMP FP16 numerical stability verified on device: {device}")
 
 
+def _resolve_config_path():
+    candidates = [
+        'configs/p3_ablation/b2_p3_run_c_d4_k2_h64_phase6_b1_ab_bpl.yaml',
+        'SAGE_LITE/configs/p3_ablation/b2_p3_run_c_d4_k2_h64_phase6_b1_ab_bpl.yaml',
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'configs', 'p3_ablation', 'b2_p3_run_c_d4_k2_h64_phase6_b1_ab_bpl.yaml')),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"Config not found in any candidate path: {candidates}")
+
+
+def _resolve_ckpt_path():
+    candidates = [
+        'results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth',
+        '/content/drive/MyDrive/crack_seg/P3_C_Canonical_Base_D4_K2/best_model_b2_stage1.pth',
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results', 'checkpoints', 'P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth')),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def test_4_exact_parameter_invariance():
     """Preflight 4: Verifies total and trainable parameters equal exactly 10,118,955."""
-    config_path = 'SAGE_LITE/configs/p3_ablation/b2_p3_run_c_d4_k2_h64_phase6_b1_ab_bpl.yaml'
+    config_path = _resolve_config_path()
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
@@ -137,14 +161,14 @@ def test_4_exact_parameter_invariance():
     expected = 10_118_955
     assert total_params == expected, f"Total params mismatch: {total_params:,} != {expected:,}"
     assert trainable_params == expected, f"Trainable params mismatch: {trainable_params:,} != {expected:,}"
-    print(f"[PASS] Preflight 4: Parameter invariance verified (exactly {total_params:,} params, +0 delta)")
+    print(f"[PASS] Preflight 4: Parameter invariance verified (exactly {total_params:,} params, +0 delta, config: {config_path})")
 
 
 def test_5_stage1_checkpoint_loading_contract():
     """Preflight 5: Verifies strict=True loading of Candidate B Stage-1 checkpoint and forward shape."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    config_path = 'SAGE_LITE/configs/p3_ablation/b2_p3_run_c_d4_k2_h64_phase6_b1_ab_bpl.yaml'
-    ckpt_path = 'results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth'
+    config_path = _resolve_config_path()
+    ckpt_path = _resolve_ckpt_path()
 
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
@@ -157,14 +181,14 @@ def test_5_stage1_checkpoint_loading_contract():
         use_plu_head=False
     ).to(device)
 
-    if os.path.exists(ckpt_path):
+    if ckpt_path is not None and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         sd = ckpt.get('model_state_dict', ckpt)
         # Verify strict=True loading
         model.load_state_dict(sd, strict=True)
         print(f"[PASS] Preflight 5: Loaded Candidate B Stage 1 checkpoint cleanly with strict=True: {ckpt_path}")
     else:
-        print(f"[SKIP] Preflight 5: Checkpoint {ckpt_path} not found locally, skipping strict load check.")
+        print(f"[SKIP] Preflight 5: Candidate B Stage-1 checkpoint not found in candidate paths, skipping strict load check.")
 
     model.eval()
     dummy_input = torch.randn(2, 3, 448, 448, device=device)
