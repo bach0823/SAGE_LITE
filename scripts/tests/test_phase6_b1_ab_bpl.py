@@ -131,6 +131,7 @@ def _resolve_config_path():
 
 def _resolve_ckpt_path():
     candidates = [
+        '/content/checkpoints/best_model_b2_stage1.pth',
         'results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth',
         '/content/drive/MyDrive/crack_seg/P3_C_Canonical_Base_D4_K2/best_model_b2_stage1.pth',
         os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'results', 'checkpoints', 'P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth')),
