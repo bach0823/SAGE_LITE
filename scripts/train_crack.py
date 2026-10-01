@@ -22,6 +22,8 @@ if scripts_dir not in sys.path:
 
 
 import time
+import cv2
+from scipy.ndimage import distance_transform_edt
 
 from sage.networks import create_b0_unet, create_b1_unet, create_b2_unet
 from sage.utils.dataloader import get_dataset_from_config
@@ -379,6 +381,91 @@ class SoftclDiceLoss(torch.nn.Module):
         return (1.0 - cldice).mean()
 
 
+class InterComponentSeparationLoss(torch.nn.Module):
+    r"""
+    Phase 6-D.2: Explicit Inter-Component Separation Supervision Loss.
+    Penalizes positive model predictions inside the negative moat between distinct GT connected components:
+        M_sep = U_{(i,j)} (dilate(CC_i, r_ij) \cap dilate(CC_j, r_ij)) \ GT
+    with inverse-distance weight w(x) = max(0, 1 - g_ij / G_max) for pairs with min_gap <= G_max.
+    """
+    def __init__(self, max_gap=8.0, min_cc_area=5):
+        super().__init__()
+        self.max_gap = float(max_gap)
+        self.min_cc_area = int(min_cc_area)
+
+    def extract_moat_and_weights(self, mask_np):
+        H, W = mask_np.shape
+        moat_mask = np.zeros((H, W), dtype=np.uint8)
+        weight_map = np.zeros((H, W), dtype=np.float32)
+
+        num_labels, labels = cv2.connectedComponents(mask_np, connectivity=8)
+        if num_labels <= 2:
+            return moat_mask, weight_map
+
+        valid_comps = []
+        for lbl in range(1, num_labels):
+            c_mask = (labels == lbl).astype(np.uint8)
+            if c_mask.sum() >= self.min_cc_area:
+                valid_comps.append((lbl, c_mask))
+
+        if len(valid_comps) < 2:
+            return moat_mask, weight_map
+
+        bg = (mask_np == 0)
+
+        for i in range(len(valid_comps)):
+            _, comp_i = valid_comps[i]
+            dt_i = distance_transform_edt(1 - comp_i)
+            for j in range(i + 1, len(valid_comps)):
+                _, comp_j = valid_comps[j]
+                min_d = float(np.min(dt_i[comp_j == 1]))
+
+                if min_d <= self.max_gap:
+                    r_ij = int(np.ceil(min_d / 2.0)) + 1
+                    k_size = 2 * r_ij + 1
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+
+                    d_i = cv2.dilate(comp_i, kernel)
+                    d_j = cv2.dilate(comp_j, kernel)
+                    moat_ij = (d_i & d_j) & bg
+
+                    if np.any(moat_ij):
+                        w_val = max(0.0, 1.0 - (min_d / self.max_gap))
+                        moat_mask[moat_ij == 1] = 1
+                        weight_map[moat_ij == 1] = np.maximum(weight_map[moat_ij == 1], w_val)
+
+        return moat_mask, weight_map
+
+    def compute_moat_weights_tensor(self, targets):
+        B, C, H, W = targets.shape
+        weight_maps = np.zeros((B, 1, H, W), dtype=np.float32)
+        targets_np = (targets[:, 0] > 0.5).cpu().numpy().astype(np.uint8)
+
+        for b in range(B):
+            _, w_b = self.extract_moat_and_weights(targets_np[b])
+            weight_maps[b, 0] = w_b
+
+        return torch.from_numpy(weight_maps).to(targets.device)
+
+    def forward(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+
+        with torch.no_grad():
+            weights = self.compute_moat_weights_tensor(targets)
+
+        loss_per_pixel = torch.nn.functional.softplus(logits)
+        masked_loss = loss_per_pixel * weights
+
+        weight_sum = weights.sum(dim=(1, 2, 3))
+        loss_per_sample = masked_loss.sum(dim=(1, 2, 3)) / weight_sum.clamp(min=1.0)
+
+        has_moat = (weight_sum > 0).float()
+        num_moat_samples = has_moat.sum().clamp(min=1.0)
+        return (loss_per_sample * has_moat).sum() / num_moat_samples
+
+
 class CrackBinaryLoss(torch.nn.Module):
     def __init__(
         self,
@@ -390,6 +477,9 @@ class CrackBinaryLoss(torch.nn.Module):
         margin_dilation=2,
         cldice_weight=0.0,
         cldice_iters=5,
+        separation_weight=0.0,
+        separation_max_gap=8.0,
+        separation_min_area=5,
         smooth=1e-5
     ):
         super().__init__()
@@ -398,6 +488,7 @@ class CrackBinaryLoss(torch.nn.Module):
         self.boundary_weight = boundary_weight
         self.margin_weight = margin_weight
         self.cldice_weight = cldice_weight
+        self.separation_weight = separation_weight
         self.smooth = smooth
         self.bce = torch.nn.BCEWithLogitsLoss()
         if self.boundary_weight > 0.0:
@@ -412,6 +503,10 @@ class CrackBinaryLoss(torch.nn.Module):
             self.cldice_loss = SoftclDiceLoss(iters=cldice_iters, smooth=smooth)
         else:
             self.cldice_loss = None
+        if self.separation_weight > 0.0:
+            self.separation_loss = InterComponentSeparationLoss(max_gap=separation_max_gap, min_cc_area=separation_min_area)
+        else:
+            self.separation_loss = None
 
     def forward(self, logits, targets):
         if targets.dim() == 3:
@@ -436,6 +531,9 @@ class CrackBinaryLoss(torch.nn.Module):
         if self.cldice_loss is not None:
             cl_loss = self.cldice_loss(logits, targets)
             total_loss = total_loss + self.cldice_weight * cl_loss
+        if self.separation_loss is not None:
+            sep_loss = self.separation_loss(logits, targets)
+            total_loss = total_loss + self.separation_weight * sep_loss
 
         return total_loss
 
@@ -610,6 +708,9 @@ def main(args):
     ab_bpl_dilation = int(config.get('ab_bpl_dilation', 2))
     cldice_weight = float(config.get('cldice_weight', 0.0))
     cldice_iters = int(config.get('cldice_iters', 5))
+    separation_weight = float(config.get('separation_weight', 0.0))
+    separation_max_gap = float(config.get('separation_max_gap', 8.0))
+    separation_min_area = int(config.get('separation_min_area', 5))
     criterion = CrackBinaryLoss(
         bce_weight=1.0,
         dice_weight=1.5,
@@ -619,6 +720,9 @@ def main(args):
         margin_dilation=ab_bpl_dilation,
         cldice_weight=cldice_weight,
         cldice_iters=cldice_iters,
+        separation_weight=separation_weight,
+        separation_max_gap=separation_max_gap,
+        separation_min_area=separation_min_area,
     )
     if boundary_iou_weight > 0.0:
         logger.info(f"Boundary IoU Loss enabled: weight={boundary_iou_weight}, dilation={boundary_iou_dilation}")
@@ -626,6 +730,8 @@ def main(args):
         logger.info(f"Asymmetric Boundary-Band Penalty Loss (AB-BPL) enabled: weight={ab_bpl_weight}, dilation={ab_bpl_dilation}")
     if cldice_weight > 0.0:
         logger.info(f"Soft-clDice Loss enabled: weight={cldice_weight}, iters={cldice_iters}")
+    if separation_weight > 0.0:
+        logger.info(f"Inter-Component Separation Loss enabled: weight={separation_weight}, max_gap={separation_max_gap}px, min_area={separation_min_area}px")
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     base_lr = float(config.get('lr', 1e-4))
