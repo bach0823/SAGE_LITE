@@ -326,6 +326,59 @@ class AsymmetricBoundaryBandPenaltyLoss(torch.nn.Module):
         return loss_per_sample.mean()
 
 
+def soft_erode(img):
+    p1 = -torch.nn.functional.max_pool2d(-img, (3, 1), (1, 1), (1, 0))
+    p2 = -torch.nn.functional.max_pool2d(-img, (1, 3), (1, 1), (0, 1))
+    return torch.min(p1, p2)
+
+
+def soft_dilate(img):
+    return torch.nn.functional.max_pool2d(img, (3, 3), (1, 1), (1, 1))
+
+
+def soft_open(img):
+    return soft_dilate(soft_erode(img))
+
+
+def soft_skel(img, iters=5):
+    img1 = soft_open(img)
+    skel = torch.nn.functional.relu(img - img1)
+    for _ in range(iters):
+        img = soft_erode(img)
+        img1 = soft_open(img)
+        delta = torch.nn.functional.relu(img - img1)
+        skel = skel + torch.nn.functional.relu(delta - skel * delta)
+    return skel
+
+
+class SoftclDiceLoss(torch.nn.Module):
+    r"""
+    Soft Centerline Dice (Soft-clDice) Loss for topology preservation (Shit et al., CVPR 2021).
+    Extracts differentiable soft skeletons via iterative min/max morphological operations
+    and computes the harmonic mean of skeleton precision and skeleton sensitivity.
+    """
+    def __init__(self, iters=5, smooth=1e-5):
+        super().__init__()
+        self.iters = int(iters)
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+        probs = torch.sigmoid(logits)
+
+        skel_pred = soft_skel(probs, self.iters)
+        with torch.no_grad():
+            skel_true = soft_skel(targets, self.iters)
+
+        tprec = (torch.sum(skel_pred * targets, dim=(1, 2, 3)) + self.smooth) / (torch.sum(skel_pred, dim=(1, 2, 3)) + self.smooth)
+        tsens = (torch.sum(skel_true * probs, dim=(1, 2, 3)) + self.smooth) / (torch.sum(skel_true, dim=(1, 2, 3)) + self.smooth)
+
+        cldice = (2.0 * tprec * tsens) / (tprec + tsens)
+        return (1.0 - cldice).mean()
+
+
 class CrackBinaryLoss(torch.nn.Module):
     def __init__(
         self,
@@ -335,6 +388,8 @@ class CrackBinaryLoss(torch.nn.Module):
         boundary_dilation=2,
         margin_weight=0.0,
         margin_dilation=2,
+        cldice_weight=0.0,
+        cldice_iters=5,
         smooth=1e-5
     ):
         super().__init__()
@@ -342,6 +397,7 @@ class CrackBinaryLoss(torch.nn.Module):
         self.dice_weight = dice_weight
         self.boundary_weight = boundary_weight
         self.margin_weight = margin_weight
+        self.cldice_weight = cldice_weight
         self.smooth = smooth
         self.bce = torch.nn.BCEWithLogitsLoss()
         if self.boundary_weight > 0.0:
@@ -352,6 +408,10 @@ class CrackBinaryLoss(torch.nn.Module):
             self.margin_loss = AsymmetricBoundaryBandPenaltyLoss(dilation=margin_dilation, smooth=smooth)
         else:
             self.margin_loss = None
+        if self.cldice_weight > 0.0:
+            self.cldice_loss = SoftclDiceLoss(iters=cldice_iters, smooth=smooth)
+        else:
+            self.cldice_loss = None
 
     def forward(self, logits, targets):
         if targets.dim() == 3:
@@ -373,6 +433,9 @@ class CrackBinaryLoss(torch.nn.Module):
         if self.margin_loss is not None:
             m_loss = self.margin_loss(logits, targets)
             total_loss = total_loss + self.margin_weight * m_loss
+        if self.cldice_loss is not None:
+            cl_loss = self.cldice_loss(logits, targets)
+            total_loss = total_loss + self.cldice_weight * cl_loss
 
         return total_loss
 
@@ -545,6 +608,8 @@ def main(args):
     boundary_iou_dilation = int(config.get('boundary_iou_dilation', 2))
     ab_bpl_weight = float(config.get('ab_bpl_weight', 0.0))
     ab_bpl_dilation = int(config.get('ab_bpl_dilation', 2))
+    cldice_weight = float(config.get('cldice_weight', 0.0))
+    cldice_iters = int(config.get('cldice_iters', 5))
     criterion = CrackBinaryLoss(
         bce_weight=1.0,
         dice_weight=1.5,
@@ -552,11 +617,15 @@ def main(args):
         boundary_dilation=boundary_iou_dilation,
         margin_weight=ab_bpl_weight,
         margin_dilation=ab_bpl_dilation,
+        cldice_weight=cldice_weight,
+        cldice_iters=cldice_iters,
     )
     if boundary_iou_weight > 0.0:
         logger.info(f"Boundary IoU Loss enabled: weight={boundary_iou_weight}, dilation={boundary_iou_dilation}")
     if ab_bpl_weight > 0.0:
         logger.info(f"Asymmetric Boundary-Band Penalty Loss (AB-BPL) enabled: weight={ab_bpl_weight}, dilation={ab_bpl_dilation}")
+    if cldice_weight > 0.0:
+        logger.info(f"Soft-clDice Loss enabled: weight={cldice_weight}, iters={cldice_iters}")
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     base_lr = float(config.get('lr', 1e-4))
