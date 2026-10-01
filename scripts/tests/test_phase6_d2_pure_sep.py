@@ -128,6 +128,7 @@ def test_4_parameter_invariance():
 def test_5_checkpoint_lineage_loading():
     print("[RUNNING] Preflight 5: Strict Checkpoint Lineage Loading from Candidate B Stage-1...")
     ckpt_candidates = [
+        "/content/checkpoints/best_model_b2_stage1.pth",
         os.path.join(project_root, "..", "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth"),
         os.path.join(project_root, "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth"),
         "/content/drive/MyDrive/crack_seg/P3_C_Canonical_Base_D4_K2_H64_Phase5_SAGELR2e-4/best_model_b2_stage1.pth",
@@ -140,7 +141,7 @@ def test_5_checkpoint_lineage_loading():
             break
 
     if ckpt_path is None:
-        print("  [SKIP] Preflight 5: Local checkpoint not found at standard path, will verify on Colab.")
+        print("  [SKIP] Preflight 5: Checkpoint not found at standard paths, will verify on Colab.")
         return
 
     sage_cfg = {
@@ -159,6 +160,20 @@ def test_5_checkpoint_lineage_loading():
     sd = ckpt.get('model_state_dict', ckpt)
     missing, unexpected = model.load_state_dict(sd, strict=True)
     assert len(missing) == 0 and len(unexpected) == 0
+
+    # Also verify RNG checkpoint if present
+    rng_candidates = [
+        "/content/checkpoints/last_model_b2_stage1_rng.pth",
+        os.path.join(project_root, "..", "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_last_model_b2_stage1_rng.pth"),
+        os.path.join(project_root, "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_last_model_b2_stage1_rng.pth"),
+    ]
+    for rp in rng_candidates:
+        if os.path.exists(rp):
+            rng_data = torch.load(rp, map_location='cpu', weights_only=False)
+            assert 'rng_state' in rng_data, f"Missing rng_state in {rp}"
+            print(f"  [PASS] Verified RNG checkpoint keys from: {os.path.basename(rp)}")
+            break
+
     print(f"  [PASS] Preflight 5: Successfully verified strict checkpoint lineage from: {os.path.basename(ckpt_path)}")
 
 
