@@ -130,6 +130,7 @@ def test_5_checkpoint_lineage_loading():
     ckpt_candidates = [
         os.path.join(project_root, "..", "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth"),
         os.path.join(project_root, "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth"),
+        "/content/drive/MyDrive/crack_seg/P3_C_Canonical_Base_D4_K2_H64_Phase5_SAGELR2e-4/best_model_b2_stage1.pth",
         "/content/drive/MyDrive/crack_seg/P3_C_D4_K2_H64_Phase5_SAGELR2e-4/best_model_b2_stage1.pth",
     ]
     ckpt_path = None
