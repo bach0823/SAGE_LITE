@@ -290,18 +290,68 @@ class SoftBoundaryIoULoss(torch.nn.Module):
         return 1.0 - boundary_iou.mean()
 
 
+class AsymmetricBoundaryBandPenaltyLoss(torch.nn.Module):
+    r"""
+    Asymmetric Boundary-Band Penalty Loss (AB-BPL) for crack boundary margin refinement.
+    Extracts the narrow background margin band immediately adjacent to the ground-truth crack:
+        M_bg = dilate(GT, r) \ GT
+    and computes the masked average softplus loss (BCE with zero target) over M_bg,
+    strictly penalizing False Positives outside the boundary without penalizing False Negatives inside.
+    """
+    def __init__(self, dilation=2, smooth=1e-5):
+        super().__init__()
+        self.dilation = int(dilation)
+        self.kernel_size = 2 * self.dilation + 1
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+
+        with torch.no_grad():
+            dilated = torch.nn.functional.max_pool2d(
+                targets,
+                kernel_size=self.kernel_size,
+                stride=1,
+                padding=self.dilation
+            )
+            margin_mask = (dilated > 0.5) & (targets <= 0.5)
+
+        loss_per_pixel = torch.nn.functional.softplus(logits)
+        masked_loss = loss_per_pixel * margin_mask.float()
+
+        margin_pixels = margin_mask.sum(dim=(1, 2, 3)).float().clamp(min=1.0)
+        loss_per_sample = masked_loss.sum(dim=(1, 2, 3)) / margin_pixels
+        return loss_per_sample.mean()
+
+
 class CrackBinaryLoss(torch.nn.Module):
-    def __init__(self, bce_weight=1.0, dice_weight=1.5, boundary_weight=0.0, boundary_dilation=2, smooth=1e-5):
+    def __init__(
+        self,
+        bce_weight=1.0,
+        dice_weight=1.5,
+        boundary_weight=0.0,
+        boundary_dilation=2,
+        margin_weight=0.0,
+        margin_dilation=2,
+        smooth=1e-5
+    ):
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.boundary_weight = boundary_weight
+        self.margin_weight = margin_weight
         self.smooth = smooth
         self.bce = torch.nn.BCEWithLogitsLoss()
         if self.boundary_weight > 0.0:
             self.boundary_loss = SoftBoundaryIoULoss(dilation=boundary_dilation, smooth=smooth)
         else:
             self.boundary_loss = None
+        if self.margin_weight > 0.0:
+            self.margin_loss = AsymmetricBoundaryBandPenaltyLoss(dilation=margin_dilation, smooth=smooth)
+        else:
+            self.margin_loss = None
 
     def forward(self, logits, targets):
         if targets.dim() == 3:
@@ -320,6 +370,9 @@ class CrackBinaryLoss(torch.nn.Module):
         if self.boundary_loss is not None:
             b_loss = self.boundary_loss(logits, targets)
             total_loss = total_loss + self.boundary_weight * b_loss
+        if self.margin_loss is not None:
+            m_loss = self.margin_loss(logits, targets)
+            total_loss = total_loss + self.margin_weight * m_loss
 
         return total_loss
 
@@ -490,14 +543,20 @@ def main(args):
 
     boundary_iou_weight = float(config.get('boundary_iou_weight', 0.0))
     boundary_iou_dilation = int(config.get('boundary_iou_dilation', 2))
+    ab_bpl_weight = float(config.get('ab_bpl_weight', 0.0))
+    ab_bpl_dilation = int(config.get('ab_bpl_dilation', 2))
     criterion = CrackBinaryLoss(
         bce_weight=1.0,
         dice_weight=1.5,
         boundary_weight=boundary_iou_weight,
         boundary_dilation=boundary_iou_dilation,
+        margin_weight=ab_bpl_weight,
+        margin_dilation=ab_bpl_dilation,
     )
     if boundary_iou_weight > 0.0:
         logger.info(f"Boundary IoU Loss enabled: weight={boundary_iou_weight}, dilation={boundary_iou_dilation}")
+    if ab_bpl_weight > 0.0:
+        logger.info(f"Asymmetric Boundary-Band Penalty Loss (AB-BPL) enabled: weight={ab_bpl_weight}, dilation={ab_bpl_dilation}")
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     base_lr = float(config.get('lr', 1e-4))
