@@ -200,6 +200,10 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
     use_plu_head = cfg.get("use_plu_head", False)
     use_cgsr = cfg.get("use_cgsr", cfg.get("cgsr", False))
     cgsr_init_bias = float(cfg.get("cgsr_init_bias", 3.0))
+    use_point_rend = cfg.get("use_point_rend", False)
+    point_rend_mid_channels = int(cfg.get("point_rend_mid_channels", 128))
+    point_rend_train_points = int(cfg.get("point_rend_train_points", 2048))
+    point_rend_subdivision_points = int(cfg.get("point_rend_subdivision_points", 8192))
 
     model = create_b2_unet(
         num_transformer_layers=num_layers,
@@ -209,6 +213,10 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         use_plu_head=use_plu_head,
         use_cgsr=use_cgsr,
         cgsr_init_bias=cgsr_init_bias,
+        use_point_rend=use_point_rend,
+        point_rend_mid_channels=point_rend_mid_channels,
+        point_rend_train_points=point_rend_train_points,
+        point_rend_subdivision_points=point_rend_subdivision_points,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
