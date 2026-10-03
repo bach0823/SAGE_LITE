@@ -597,6 +597,16 @@ def main(args):
         config['use_cgsr'] = args.use_cgsr
     if getattr(args, 'cgsr_init_bias', None) is not None:
         config['cgsr_init_bias'] = args.cgsr_init_bias
+    if getattr(args, 'use_point_rend', None) is not None:
+        config['use_point_rend'] = args.use_point_rend
+    if getattr(args, 'point_loss_weight', None) is not None:
+        config['point_loss_weight'] = args.point_loss_weight
+    if getattr(args, 'point_rend_train_points', None) is not None:
+        config['point_rend_train_points'] = args.point_rend_train_points
+    if getattr(args, 'point_rend_subdivision_points', None) is not None:
+        config['point_rend_subdivision_points'] = args.point_rend_subdivision_points
+    if getattr(args, 'point_rend_mid_channels', None) is not None:
+        config['point_rend_mid_channels'] = args.point_rend_mid_channels
 
     set_seed(config.get('seed', 42))
 
@@ -640,6 +650,11 @@ def main(args):
     p3_mode = config.get('p3_mode', None)
     use_cgsr = config.get('use_cgsr', config.get('cgsr', False))
     cgsr_init_bias = float(config.get('cgsr_init_bias', 3.0))
+    use_point_rend = config.get('use_point_rend', config.get('point_rend', False))
+    point_loss_weight = float(config.get('point_loss_weight', 1.0))
+    point_rend_train_points = int(config.get('point_rend_train_points', 2048))
+    point_rend_subdivision_points = int(config.get('point_rend_subdivision_points', 8192))
+    point_rend_mid_channels = int(config.get('point_rend_mid_channels', 128))
 
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
@@ -662,8 +677,13 @@ def main(args):
             use_plu_head=use_plu_head,
             use_cgsr=use_cgsr,
             cgsr_init_bias=cgsr_init_bias,
+            use_point_rend=use_point_rend,
+            point_rend_mid_channels=point_rend_mid_channels,
+            point_rend_train_points=point_rend_train_points,
+            point_rend_subdivision_points=point_rend_subdivision_points,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}")
+
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
 
@@ -741,7 +761,12 @@ def main(args):
         logger.info(f"Soft-clDice Loss enabled: weight={cldice_weight}, iters={cldice_iters}")
     if separation_weight > 0.0:
         logger.info(f"Inter-Component Separation Loss enabled: weight={separation_weight}, max_gap={separation_max_gap}px, min_area={separation_min_area}px")
+    if use_point_rend:
+        from sage.networks.point_rend import PointRendLoss
+        criterion = PointRendLoss(base_criterion=criterion, point_loss_weight=point_loss_weight)
+        logger.info(f"PointRend Decoupled Loss wrapper enabled: point_loss_weight={point_loss_weight}")
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
+
 
     base_lr = float(config.get('lr', 1e-4))
     sage_lr = float(config.get('sage_lr', base_lr))
@@ -837,9 +862,21 @@ def main(args):
                         lb_loss = model.compute_total_load_balance_loss(routing_infos)
                     else:
                         logits = model(images)
+                        forward_out = logits
                         lb_loss = torch.tensor(0.0, device=device)
-                    seg_loss = criterion(logits, labels)
+
+                    if isinstance(forward_out, dict) and 'point_logits' in forward_out and hasattr(criterion, 'bce_point'):
+                        seg_loss = criterion(
+                            logits=logits,
+                            targets=labels,
+                            point_logits=forward_out.get('point_logits'),
+                            point_coords=forward_out.get('point_coords'),
+                            coarse_logits=forward_out.get('coarse_logits'),
+                        )
+                    else:
+                        seg_loss = criterion(logits, labels)
                     loss = seg_loss + 1.0 * lb_loss
+
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -1186,9 +1223,21 @@ def main(args):
                         lb_loss = model.compute_total_load_balance_loss(routing_infos)
                     else:
                         logits = model(images)
+                        forward_out = logits
                         lb_loss = torch.tensor(0.0, device=device)
-                    seg_loss = criterion(logits, labels)
+
+                    if isinstance(forward_out, dict) and 'point_logits' in forward_out and hasattr(criterion, 'bce_point'):
+                        seg_loss = criterion(
+                            logits=logits,
+                            targets=labels,
+                            point_logits=forward_out.get('point_logits'),
+                            point_coords=forward_out.get('point_coords'),
+                            coarse_logits=forward_out.get('coarse_logits'),
+                        )
+                    else:
+                        seg_loss = criterion(logits, labels)
                     loss = seg_loss + 1.0 * lb_loss
+
                     
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -1394,7 +1443,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
     parser.add_argument('--cgsr', '--use-cgsr', action='store_true', dest='use_cgsr', default=None, help='Enable Context-Guided Stage-1 Skip Refinement (CGSR) for Phase 6D')
     parser.add_argument('--cgsr-init-bias', type=float, default=None, help='Initial bias for CGSR gate (default: 3.0)')
+    parser.add_argument('--point-rend', '--use-point-rend', action='store_true', dest='use_point_rend', default=None, help='Enable PointRend Decoder Refinement Head')
+    parser.add_argument('--point-loss-weight', type=float, default=None, help='Loss weight for PointRend BCE point loss (default: 1.0)')
+    parser.add_argument('--point-rend-train-points', type=int, default=None, help='Number of points to sample during training (default: 2048)')
+    parser.add_argument('--point-rend-subdivision-points', type=int, default=None, help='Number of points to refine during subdivision inference (default: 8192)')
+    parser.add_argument('--point-rend-mid-channels', type=int, default=None, help='Hidden channels in Point Head MLP (default: 128)')
     return parser
+
 
 
 if __name__ == '__main__':

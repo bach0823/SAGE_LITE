@@ -16,7 +16,7 @@ Date: September 2026
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,11 @@ def make_conv3x3(in_ch: int, out_ch: int, use_dwsc: bool = False) -> nn.Module:
 
 
 from .cgsr import ContextGuidedStage1SkipRefinement
+from .point_rend import (
+    PointRendHead,
+    sample_training_points,
+    subdivide_and_refine,
+)
 
 
 class DecoderBlock(nn.Module):
@@ -232,6 +237,10 @@ class UNetDecoder(nn.Module):
         use_plu_head: bool = False,
         use_cgsr: bool = False,
         cgsr_init_bias: float = 3.0,
+        use_point_rend: bool = False,
+        point_rend_mid_channels: int = 128,
+        point_rend_train_points: int = 2048,
+        point_rend_subdivision_points: int = 8192,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -240,6 +249,10 @@ class UNetDecoder(nn.Module):
         self.use_plu_head = use_plu_head
         self.use_cgsr = use_cgsr
         self.cgsr_init_bias = cgsr_init_bias
+        self.use_point_rend = use_point_rend
+        self.point_rend_mid_channels = point_rend_mid_channels
+        self.point_rend_train_points = point_rend_train_points
+        self.point_rend_subdivision_points = point_rend_subdivision_points
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
@@ -288,12 +301,22 @@ class UNetDecoder(nn.Module):
                 nn.Conv2d(head_mid_channels, num_classes, kernel_size=1),
             )
 
+        if self.use_point_rend:
+            self.point_rend_head = PointRendHead(
+                in_channels=final_channels,
+                num_classes=num_classes,
+                mid_channels=point_rend_mid_channels,
+            )
+        else:
+            self.point_rend_head = None
+
     def forward(
         self,
         bottleneck: torch.Tensor,
         skips: List[torch.Tensor],
         target_size: Optional[Tuple[int, int]] = (448, 448),
-    ) -> torch.Tensor:
+        return_point_rend_dict: bool = False,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass through UNet Decoder.
 
@@ -304,9 +327,10 @@ class UNetDecoder(nn.Module):
                 - skips[1]: Stage 1 (B, 96, 56, 56)
                 - skips[2]: Stage 2 (B, 192, 28, 28)
             target_size (Tuple[int, int], optional): Final image resolution (default: (448, 448)).
+            return_point_rend_dict (bool): If True, returns dict with point training tensors.
 
         Returns:
-            torch.Tensor: Segmentation logits of shape (B, num_classes, 448, 448).
+            torch.Tensor or Dict: Refined logits or training point dictionary.
         """
         # Reverse skips to deep-to-shallow order: [Stage 2 (192), Stage 1 (96), Stage 0 (48)]
         reversed_skips = list(reversed(skips))
@@ -319,6 +343,43 @@ class UNetDecoder(nn.Module):
         for i, block in enumerate(self.decoder_blocks):
             skip = reversed_skips[i]
             x_dec = block(x_dec, skip)
+
+        if self.use_point_rend:
+            # 1. Coarse prediction at 112x112
+            coarse_logits = self.segmentation_head(x_dec)
+
+            if self.training:
+                # Training mode: sample uncertain points
+                point_coords = sample_training_points(
+                    coarse_logits,
+                    num_points=self.point_rend_train_points,
+                )
+                point_logits = self.point_rend_head(x_dec, coarse_logits, point_coords)
+
+                coarse_upsampled = F.interpolate(
+                    coarse_logits,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                if return_point_rend_dict:
+                    return {
+                        "logits": coarse_upsampled,
+                        "coarse_logits": coarse_logits,
+                        "point_logits": point_logits,
+                        "point_coords": point_coords,
+                    }
+                return coarse_upsampled
+            else:
+                # Evaluation mode: adaptive subdivision refinement
+                logits = subdivide_and_refine(
+                    fine_features=x_dec,
+                    coarse_logits=coarse_logits,
+                    point_head=self.point_rend_head,
+                    target_size=target_size,
+                    num_subdivision_points=self.point_rend_subdivision_points,
+                )
+                return logits
 
         if self.use_plu_head:
             logits = self.segmentation_head(x_dec, target_size=target_size)

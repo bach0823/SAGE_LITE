@@ -83,6 +83,10 @@ class B2ConvNeXtViTUNet(nn.Module):
         use_plu_head: bool = False,
         use_cgsr: bool = False,
         cgsr_init_bias: float = 3.0,
+        use_point_rend: bool = False,
+        point_rend_mid_channels: int = 128,
+        point_rend_train_points: int = 2048,
+        point_rend_subdivision_points: int = 8192,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -92,6 +96,10 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.use_plu_head = use_plu_head
         self.use_cgsr = use_cgsr
         self.cgsr_init_bias = float(cgsr_init_bias)
+        self.use_point_rend = use_point_rend
+        self.point_rend_mid_channels = point_rend_mid_channels
+        self.point_rend_train_points = point_rend_train_points
+        self.point_rend_subdivision_points = point_rend_subdivision_points
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -109,7 +117,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             pretrained=pretrained,
         )
 
-        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head / CGSR)
+        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head / CGSR / PointRend)
         self.decoder = UNetDecoder(
             encoder_channels=self.backbone.encoder_channels,
             num_classes=num_classes,
@@ -117,6 +125,10 @@ class B2ConvNeXtViTUNet(nn.Module):
             use_plu_head=use_plu_head,
             use_cgsr=use_cgsr,
             cgsr_init_bias=cgsr_init_bias,
+            use_point_rend=use_point_rend,
+            point_rend_mid_channels=point_rend_mid_channels,
+            point_rend_train_points=point_rend_train_points,
+            point_rend_subdivision_points=point_rend_subdivision_points,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -172,15 +184,20 @@ class B2ConvNeXtViTUNet(nn.Module):
                     module._update_shared_mask()
 
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_point_rend_dict: bool = False,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass satisfying Strict Tensor Contract (Lock #1).
         
         Args:
             x (torch.Tensor): Input tensor of shape (B, 3, H, W).
+            return_point_rend_dict (bool): Whether to return training point dict if PointRend active.
             
         Returns:
-            torch.Tensor: Segmentation logits of shape (B, num_classes, H, W).
+            torch.Tensor or Dict: Segmentation logits of shape (B, num_classes, H, W) or point dict.
         """
         target_size = (x.shape[2], x.shape[3])
 
@@ -190,13 +207,14 @@ class B2ConvNeXtViTUNet(nn.Module):
         bottleneck = feat_dict["bottleneck"]
 
         # 2. Decode features with progressive upsampling
-        logits = self.decoder(
+        out = self.decoder(
             bottleneck=bottleneck,
             skips=skips,
             target_size=target_size,
+            return_point_rend_dict=return_point_rend_dict,
         )
 
-        return logits
+        return out
 
     def forward_with_routing_info(self, x: torch.Tensor) -> Dict[str, Any]:
         """
@@ -209,9 +227,22 @@ class B2ConvNeXtViTUNet(nn.Module):
             dict containing:
                 - 'logits': Segmentation logits (B, num_classes, H, W).
                 - 'routing_infos': Dict with 'cnn', 'transformer', and 'all' lists.
+                - (optional) 'coarse_logits', 'point_logits', 'point_coords' if PointRend in training.
         """
-        # 1. Normal forward pass (caches routing info inside each SageLayer)
-        logits = self.forward(x)
+        # 1. Normal forward pass (request point_rend_dict if PointRend is in training mode)
+        if self.decoder.use_point_rend and self.training:
+            dec_out = self.forward(x, return_point_rend_dict=True)
+            if isinstance(dec_out, dict):
+                logits = dec_out["logits"]
+                coarse_logits = dec_out.get("coarse_logits")
+                point_logits = dec_out.get("point_logits")
+                point_coords = dec_out.get("point_coords")
+            else:
+                logits = dec_out
+                coarse_logits = point_logits = point_coords = None
+        else:
+            logits = self.forward(x)
+            coarse_logits = point_logits = point_coords = None
 
         # 2. Harvest routing info from all CNN stages and ViT blocks
         cnn_routing_infos = []
@@ -226,7 +257,7 @@ class B2ConvNeXtViTUNet(nn.Module):
 
         all_routing_infos = cnn_routing_infos + transformer_routing_infos
 
-        return {
+        res = {
             "logits": logits,
             "routing_infos": {
                 "cnn": cnn_routing_infos,
@@ -234,6 +265,12 @@ class B2ConvNeXtViTUNet(nn.Module):
                 "all": all_routing_infos,
             },
         }
+        if coarse_logits is not None:
+            res["coarse_logits"] = coarse_logits
+            res["point_logits"] = point_logits
+            res["point_coords"] = point_coords
+
+        return res
 
     def compute_total_load_balance_loss(
         self,
@@ -375,6 +412,26 @@ class B2ConvNeXtViTUNet(nn.Module):
                     f"0 other missing, 0 unexpected."
                 )
             return missing, unexpected
+        elif self.decoder.use_point_rend:
+            has_pr_keys = any('decoder.point_rend_head.' in k for k in state_dict.keys())
+            if has_pr_keys:
+                missing, unexpected = self.load_state_dict(state_dict, strict=True)
+                logger.info("Successfully loaded Stage 1 PointRend checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
+            else:
+                missing, unexpected = self.load_state_dict(state_dict, strict=False)
+                pr_missing = [k for k in missing if 'decoder.point_rend_head.' in k]
+                other_missing = [k for k in missing if 'decoder.point_rend_head.' not in k]
+                if len(other_missing) > 0 or len(unexpected) > 0:
+                    raise ValueError(
+                        f"FATAL: Loading Candidate B Stage 1 checkpoint into PointRend model failed invariant check! "
+                        f"Unexpected missing: {other_missing}, unexpected keys: {unexpected}"
+                    )
+                logger.info(
+                    f"Successfully loaded Candidate B Stage 1 checkpoint into PointRend model. "
+                    f"{len(pr_missing)} PointRend head tensors freshly initialized, "
+                    f"0 other missing, 0 unexpected."
+                )
+            return missing, unexpected
         else:
             missing, unexpected = self.load_state_dict(state_dict, strict=True)
             return missing, unexpected
@@ -393,6 +450,10 @@ def create_b2_unet(
     use_plu_head: bool = False,
     use_cgsr: bool = False,
     cgsr_init_bias: float = 3.0,
+    use_point_rend: bool = False,
+    point_rend_mid_channels: int = 128,
+    point_rend_train_points: int = 2048,
+    point_rend_subdivision_points: int = 8192,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -410,4 +471,9 @@ def create_b2_unet(
         use_plu_head=use_plu_head,
         use_cgsr=use_cgsr,
         cgsr_init_bias=cgsr_init_bias,
+        use_point_rend=use_point_rend,
+        point_rend_mid_channels=point_rend_mid_channels,
+        point_rend_train_points=point_rend_train_points,
+        point_rend_subdivision_points=point_rend_subdivision_points,
     )
+
