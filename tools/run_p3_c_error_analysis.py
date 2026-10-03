@@ -419,14 +419,18 @@ def main():
     sage_cfg = model_cfg.get("sage_config", {})
 
     use_plu_head = model_cfg.get("use_plu_head", False)
+    use_cgsr = model_cfg.get("use_cgsr", model_cfg.get("cgsr", False))
+    cgsr_init_bias = float(model_cfg.get("cgsr_init_bias", 3.0))
 
-    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size}, top_k={sage_cfg.get('top_k', 4)}, use_plu_head={use_plu_head})...")
+    print(f"Initializing B2 UNet (Depth={num_layers}, p3_mode='{p3_mode}', img_size={img_size}, top_k={sage_cfg.get('top_k', 4)}, use_plu_head={use_plu_head}, use_cgsr={use_cgsr})...")
     model = create_b2_unet(
         num_transformer_layers=num_layers,
         p3_mode=p3_mode,
         img_size=img_size,
         sage_config=sage_cfg,
         use_plu_head=use_plu_head,
+        use_cgsr=use_cgsr,
+        cgsr_init_bias=cgsr_init_bias,
     ).to(device)
 
     if use_plu_head:

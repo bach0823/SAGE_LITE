@@ -282,9 +282,11 @@ def load_model_from_checkpoint(
     sage_cfg = config.get("sage_config", {})
 
     use_plu_head = config.get("use_plu_head", False)
+    use_cgsr = config.get("use_cgsr", config.get("cgsr", False))
+    cgsr_init_bias = float(config.get("cgsr_init_bias", 3.0))
 
     logger.info(f"Instantiating B2 UNet: Depth={vit_depth}, BS={config.get('batch_size', 14)}, "
-                f"p3_mode='{p3_mode}', img_size={img_size}, use_plu_head={use_plu_head}")
+                f"p3_mode='{p3_mode}', img_size={img_size}, use_plu_head={use_plu_head}, use_cgsr={use_cgsr}")
 
     model = create_b2_unet(
         num_classes=1,
@@ -294,6 +296,8 @@ def load_model_from_checkpoint(
         sage_config=sage_cfg,
         p3_mode=p3_mode,
         use_plu_head=use_plu_head,
+        use_cgsr=use_cgsr,
+        cgsr_init_bias=cgsr_init_bias,
     ).to(device)
 
     if use_plu_head:

@@ -198,6 +198,8 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
     img_size = int(cfg.get("img_size", 448))
     sage_cfg = cfg.get("sage_config", {})
     use_plu_head = cfg.get("use_plu_head", False)
+    use_cgsr = cfg.get("use_cgsr", cfg.get("cgsr", False))
+    cgsr_init_bias = float(cfg.get("cgsr_init_bias", 3.0))
 
     model = create_b2_unet(
         num_transformer_layers=num_layers,
@@ -205,6 +207,8 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         img_size=img_size,
         sage_config=sage_cfg,
         use_plu_head=use_plu_head,
+        use_cgsr=use_cgsr,
+        cgsr_init_bias=cgsr_init_bias,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
