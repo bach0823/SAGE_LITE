@@ -81,6 +81,8 @@ class B2ConvNeXtViTUNet(nn.Module):
         sage_config: Optional[Dict[str, Any]] = None,
         p3_mode: Optional[str] = None,
         use_plu_head: bool = False,
+        use_cgsr: bool = False,
+        cgsr_init_bias: float = 3.0,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -88,6 +90,8 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.num_transformer_layers = num_transformer_layers
         self.p3_mode = p3_mode
         self.use_plu_head = use_plu_head
+        self.use_cgsr = use_cgsr
+        self.cgsr_init_bias = float(cgsr_init_bias)
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -105,12 +109,14 @@ class B2ConvNeXtViTUNet(nn.Module):
             pretrained=pretrained,
         )
 
-        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head)
+        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head / CGSR)
         self.decoder = UNetDecoder(
             encoder_channels=self.backbone.encoder_channels,
             num_classes=num_classes,
             use_dwsc=use_dwsc,
             use_plu_head=use_plu_head,
+            use_cgsr=use_cgsr,
+            cgsr_init_bias=cgsr_init_bias,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -347,6 +353,28 @@ class B2ConvNeXtViTUNet(nn.Module):
             missing, unexpected = self.load_state_dict(state_dict, strict=True)
             logger.info("Successfully loaded Stage 1 PLU checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
             return missing, unexpected
+        elif self.use_cgsr:
+            has_cgsr_keys = any('decoder.decoder_blocks.1.cgsr.' in k for k in state_dict.keys())
+            if has_cgsr_keys:
+                missing, unexpected = self.load_state_dict(state_dict, strict=True)
+                logger.info("Successfully loaded Stage 1 CGSR checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
+            else:
+                # Loading from canonical Candidate B Stage 1 checkpoint:
+                # All weights match strictly except newly initialized CGSR gate (which starts near identity G~1)
+                missing, unexpected = self.load_state_dict(state_dict, strict=False)
+                cgsr_missing = [k for k in missing if 'decoder.decoder_blocks.1.cgsr.' in k]
+                other_missing = [k for k in missing if 'decoder.decoder_blocks.1.cgsr.' not in k]
+                if len(other_missing) > 0 or len(unexpected) > 0:
+                    raise ValueError(
+                        f"FATAL: Loading Candidate B Stage 1 checkpoint into CGSR model failed invariant check! "
+                        f"Unexpected missing: {other_missing}, unexpected keys: {unexpected}"
+                    )
+                logger.info(
+                    f"Successfully loaded Candidate B Stage 1 checkpoint into CGSR model. "
+                    f"{len(cgsr_missing)} CGSR gate tensors initialized to near-identity (bias={self.cgsr_init_bias}), "
+                    f"0 other missing, 0 unexpected."
+                )
+            return missing, unexpected
         else:
             missing, unexpected = self.load_state_dict(state_dict, strict=True)
             return missing, unexpected
@@ -363,6 +391,8 @@ def create_b2_unet(
     sage_config: Optional[Dict[str, Any]] = None,
     p3_mode: Optional[str] = None,
     use_plu_head: bool = False,
+    use_cgsr: bool = False,
+    cgsr_init_bias: float = 3.0,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -378,4 +408,6 @@ def create_b2_unet(
         sage_config=sage_config,
         p3_mode=p3_mode,
         use_plu_head=use_plu_head,
+        use_cgsr=use_cgsr,
+        cgsr_init_bias=cgsr_init_bias,
     )

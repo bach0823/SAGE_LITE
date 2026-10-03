@@ -593,6 +593,10 @@ def main(args):
         config['stage2_p3_lr'] = args.stage2_p3_lr
     if getattr(args, 'patience', None) is not None:
         config['patience'] = args.patience
+    if getattr(args, 'use_cgsr', None) is not None:
+        config['use_cgsr'] = args.use_cgsr
+    if getattr(args, 'cgsr_init_bias', None) is not None:
+        config['cgsr_init_bias'] = args.cgsr_init_bias
 
     set_seed(config.get('seed', 42))
 
@@ -634,6 +638,9 @@ def main(args):
     )
 
     p3_mode = config.get('p3_mode', None)
+    use_cgsr = config.get('use_cgsr', config.get('cgsr', False))
+    cgsr_init_bias = float(config.get('cgsr_init_bias', 3.0))
+
     model_type = config.get('model', 'B0')
     if model_type == 'B0':
         model = create_b0_unet(pretrained=True).to(device)
@@ -653,8 +660,10 @@ def main(args):
             sage_config=sage_cfg,
             p3_mode=p3_mode,
             use_plu_head=use_plu_head,
+            use_cgsr=use_cgsr,
+            cgsr_init_bias=cgsr_init_bias,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}")
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
 
@@ -1233,6 +1242,19 @@ def main(args):
             if g0 is not None or g1 is not None:
                 lr_str += f" (gamma: S0={g0:.4f}, S1={g1:.4f})"
 
+            if use_cgsr and hasattr(model, 'decoder') and hasattr(model.decoder, 'decoder_blocks') and len(model.decoder.decoder_blocks) > 1:
+                cgsr_mod = getattr(model.decoder.decoder_blocks[1], 'cgsr', None)
+                if cgsr_mod is not None:
+                    g_bias = cgsr_mod.gate_conv.bias.mean().item()
+                    g_wnorm = cgsr_mod.gate_conv.weight.norm().item()
+                    if cgsr_mod.last_gate is not None:
+                        g_mean = cgsr_mod.last_gate.mean().item()
+                        g_min = cgsr_mod.last_gate.min().item()
+                        g_max = cgsr_mod.last_gate.max().item()
+                        lr_str += f" | CGSR: mean={g_mean:.4f} [{g_min:.4f}-{g_max:.4f}], b={g_bias:.2f}, W={g_wnorm:.3f}"
+                    else:
+                        lr_str += f" | CGSR: b={g_bias:.2f}, W={g_wnorm:.3f}"
+
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             
             is_best_stage = False
@@ -1370,6 +1392,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--stage2-sage-lr', type=float, default=None, help='Override stage2_sage_lr')
     parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
+    parser.add_argument('--cgsr', '--use-cgsr', action='store_true', dest='use_cgsr', default=None, help='Enable Context-Guided Stage-1 Skip Refinement (CGSR) for Phase 6D')
+    parser.add_argument('--cgsr-init-bias', type=float, default=None, help='Initial bias for CGSR gate (default: 3.0)')
     return parser
 
 

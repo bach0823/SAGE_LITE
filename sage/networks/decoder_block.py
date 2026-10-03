@@ -39,6 +39,9 @@ def make_conv3x3(in_ch: int, out_ch: int, use_dwsc: bool = False) -> nn.Module:
     return nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=True)
 
 
+from .cgsr import ContextGuidedStage1SkipRefinement
+
+
 class DecoderBlock(nn.Module):
     """
     Single UNet Decoder Block with 2x upsampling, skip concatenation, and double conv3x3.
@@ -48,6 +51,8 @@ class DecoderBlock(nn.Module):
         skip_channels (int): Channel dimension of the matching encoder skip connection.
         out_channels (int): Output channel dimension.
         use_dwsc (bool): If True, uses Depthwise Separable Conv (default: False).
+        use_cgsr (bool): If True, applies Context-Guided Stage-1 Skip Refinement (default: False).
+        cgsr_init_bias (float): Initial bias for CGSR gate (default: 3.0 => G ~ 0.9526).
     """
 
     def __init__(
@@ -56,12 +61,15 @@ class DecoderBlock(nn.Module):
         skip_channels: int,
         out_channels: int,
         use_dwsc: bool = False,
+        use_cgsr: bool = False,
+        cgsr_init_bias: float = 3.0,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.skip_channels = skip_channels
         self.out_channels = out_channels
         self.use_dwsc = use_dwsc
+        self.use_cgsr = use_cgsr
 
         # 2x Transposed Convolution for spatial upsampling
         self.upsample = nn.ConvTranspose2d(
@@ -70,6 +78,15 @@ class DecoderBlock(nn.Module):
             kernel_size=2,
             stride=2,
         )
+
+        if use_cgsr:
+            self.cgsr = ContextGuidedStage1SkipRefinement(
+                in_channels=in_channels,
+                skip_channels=skip_channels,
+                init_bias=cgsr_init_bias,
+            )
+        else:
+            self.cgsr = None
 
         combined_channels = in_channels + skip_channels
 
@@ -101,6 +118,9 @@ class DecoderBlock(nn.Module):
         # Align spatial resolution in case of rounding differences
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
+
+        if self.cgsr is not None:
+            skip, _ = self.cgsr(x, skip)
 
         x = torch.cat([x, skip], dim=1)
         x = self.conv1(x)
@@ -200,6 +220,8 @@ class UNetDecoder(nn.Module):
         num_classes (int): Number of segmentation classes (default: 1 for crack).
         use_dwsc (bool): Whether to use Depthwise Separable Convolutions (default: False).
         use_plu_head (bool): Whether to use Progressive Learned Upsampling Head (default: False).
+        use_cgsr (bool): Whether to use Context-Guided Stage-1 Skip Refinement (default: False).
+        cgsr_init_bias (float): Initial bias for CGSR gate (default: 3.0).
     """
 
     def __init__(
@@ -208,31 +230,40 @@ class UNetDecoder(nn.Module):
         num_classes: int = 1,
         use_dwsc: bool = False,
         use_plu_head: bool = False,
+        use_cgsr: bool = False,
+        cgsr_init_bias: float = 3.0,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
         self.num_classes = num_classes
         self.use_dwsc = use_dwsc
         self.use_plu_head = use_plu_head
+        self.use_cgsr = use_cgsr
+        self.cgsr_init_bias = cgsr_init_bias
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
         self.decoder_blocks = nn.ModuleList()
 
         # Build 3 progressive upsampling blocks:
-        # Block 0: 384 -> 192 (with skip 192)
-        # Block 1: 192 -> 96  (with skip 96)
-        # Block 2: 96  -> 48  (with skip 48)
+        # Block 0: 384 -> 192 (with skip 192, Stage 2)
+        # Block 1: 192 -> 96  (with skip 96,  Stage 1) -> CGSR intervention site
+        # Block 2: 96  -> 48  (with skip 48,  Stage 0)
         for i in range(len(reversed_channels) - 1):
             in_ch = reversed_channels[i]
             skip_ch = reversed_channels[i + 1]
             out_ch = reversed_channels[i + 1]
+
+            # CGSR is strictly applied only to Block 1 (56x56 resolution, Stage-1 skip)
+            block_use_cgsr = use_cgsr and (i == 1)
 
             block = DecoderBlock(
                 in_channels=in_ch,
                 skip_channels=skip_ch,
                 out_channels=out_ch,
                 use_dwsc=use_dwsc,
+                use_cgsr=block_use_cgsr,
+                cgsr_init_bias=cgsr_init_bias,
             )
             self.decoder_blocks.append(block)
 
