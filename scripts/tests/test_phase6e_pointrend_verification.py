@@ -473,17 +473,11 @@ def test_8_yaml_config_validation():
     assert cfg.get("point_rend_subdivision_points") == 8192, f"Expected 8192 subdivision points, got {cfg.get('point_rend_subdivision_points')}"
     assert cfg.get("point_rend_mid_channels") == 128, f"Expected 128 mid channels, got {cfg.get('point_rend_mid_channels')}"
 
-    # Provenance
-    valid_ancestors = [
-        "/content/checkpoints/best_model_b2_stage1.pth",
-        "results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_stage1.pth",
-    ]
-    actual_ckpt = cfg.get("checkpoint") or cfg.get("locked_base_checkpoint")
-    assert any(actual_ckpt.endswith(os.path.basename(va)) for va in valid_ancestors), (
-        f"Expected checkpoint pointing to Stage 1 Candidate B ancestor, got '{actual_ckpt}'"
-    )
+    assert cfg.get("two_stage") is True, "two_stage must be True"
+    assert cfg.get("epochs") == 35, f"Expected 35 total epochs, got {cfg.get('epochs')}"
+    assert cfg.get("stage1_epochs") == 17, f"Expected 17 Stage 1 epochs, got {cfg.get('stage1_epochs')}"
 
-    print(f"  [PASS] YAML configuration at {yaml_path} satisfies 100% of Phase 6E invariants")
+    print(f"  [PASS] YAML configuration at {yaml_path} satisfies 100% of Phase 6E invariants (Pure Two-Stage)")
 
 
 def main():

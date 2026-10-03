@@ -23,7 +23,6 @@ point_loss_weight: 1.0
 point_rend_train_points: 2048
 point_rend_subdivision_points: 8192
 point_rend_mid_channels: 128
-checkpoint: "/content/checkpoints/best_model_b2_stage1.pth"
 
 seed: 42
 img_size: 448
