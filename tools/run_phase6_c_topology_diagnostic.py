@@ -184,8 +184,12 @@ def compute_topology_metrics(pred_bin: np.ndarray, target_bin: np.ndarray) -> Di
     }
 
 
-def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: torch.device):
-    """Initializes B2 UNet and loads checkpoint weights."""
+def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: torch.device, turn_off_asdw: bool = True):
+    """
+    Initializes B2 UNet and loads checkpoint weights.
+    By default (turn_off_asdw=True), ASDW refinement on Stage 0 and Stage 1 is bypassed
+    with nn.Identity(), following the official deprecation of P3-C (Interim ASDW-OFF Candidate B).
+    """
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
@@ -206,6 +210,12 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
     model.load_state_dict(state_dict)
+
+    if turn_off_asdw and hasattr(model.backbone, "convnext"):
+        for stage in model.backbone.convnext.stages[:2]:
+            if hasattr(stage, "p3_refinement") and stage.p3_refinement is not None:
+                stage.p3_refinement = nn.Identity()
+
     model.eval()
     return model
 
