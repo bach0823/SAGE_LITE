@@ -30,8 +30,8 @@ def point_sample(features: torch.Tensor, point_coords: torch.Tensor) -> torch.Te
         torch.Tensor: Sampled features of shape (B, C, N).
     """
     B, N, _ = point_coords.shape
-    # Map [0, 1] -> [-1, 1] for F.grid_sample
-    grid = point_coords.view(B, N, 1, 2) * 2.0 - 1.0
+    # Map [0, 1] -> [-1, 1] for F.grid_sample, matching features dtype for AMP compatibility
+    grid = point_coords.to(dtype=features.dtype).view(B, N, 1, 2) * 2.0 - 1.0
     output = F.grid_sample(
         features,
         grid,
@@ -236,6 +236,8 @@ def subdivide_and_refine(
 
         # 4. Scatter update refined points back into grid
         current_flat = current.view(B, num_classes, new_H * new_W).clone()
+        if refined.dtype != current_flat.dtype:
+            refined = refined.to(dtype=current_flat.dtype)
         current_flat.scatter_(
             dim=2,
             index=flat_indices.unsqueeze(1).expand(-1, num_classes, -1),
