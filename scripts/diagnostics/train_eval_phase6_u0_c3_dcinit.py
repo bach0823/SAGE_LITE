@@ -892,7 +892,7 @@ def main():
             "bridge_status": 1 if topo["bridge_events"] > 0 else 0,
             "fragmented_gt_components": topo["fragmented_gt_components"],
             "break_status": 1 if topo["fragmented_gt_components"] > 0 else 0,
-            "spurious_islands": topo["spurious_islands"],
+            "spurious_islands": topo.get("spurious_island_count", topo.get("spurious_islands", 0)),
             "gt_cc": topo["gt_cc"],
             "pred_cc": topo["pred_cc"],
             "runtime_ms": dt_ms,
