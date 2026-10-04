@@ -235,7 +235,8 @@ class ConfigurableMedicalDataset(Dataset):
         else:
             self.config = config_path_or_dict
 
-        root_dir = self.config.get('root_dir', '')
+        self.root_dir = self.config.get('root_dir', '')
+        root_dir = self.root_dir
         
         # Branch logic: DeepCrack vs Crack500 based on config explicitly, or auto-detect
         self.is_crack500 = 'Crack500' in root_dir
@@ -280,7 +281,12 @@ class ConfigurableMedicalDataset(Dataset):
         tangent_rel = self.config.get(split, {}).get('tangents', None) or self.config.get('tangents', None)
         tangent_map = {}
         if tangent_rel:
-            tangent_dir = tangent_rel if os.path.isabs(tangent_rel) else os.path.join(self.root_dir, tangent_rel)
+            if os.path.isabs(tangent_rel):
+                tangent_dir = tangent_rel
+            elif root_dir:
+                tangent_dir = os.path.join(root_dir, tangent_rel)
+            else:
+                tangent_dir = tangent_rel
             if os.path.exists(tangent_dir):
                 for root, _, files in os.walk(tangent_dir):
                     for f in files:
