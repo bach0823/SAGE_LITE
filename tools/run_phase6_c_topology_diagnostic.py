@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 from skimage.morphology import skeletonize
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 # Ensure SAGE_LITE project root is on sys.path

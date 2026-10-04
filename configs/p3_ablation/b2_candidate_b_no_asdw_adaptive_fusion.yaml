@@ -1,0 +1,63 @@
+# ==============================================================================
+# SAGE-Lite B2 Ablation: Candidate B, No ASDW, SAGE Original Adaptive Fusion
+# ==============================================================================
+# Model Architecture: B2 UNet (Depth 4: 4 CNN stages + 4 ViT blocks = 8 experts)
+# Detail/Enhancement: NO ASDW (p3_mode="A" -> Identity, 0 ASDW params, zero overhead)
+# Routing: top_k = 2 (25% capacity), router_hidden_dim = 64, gating = sigmoid, logit_mod = True
+# Fusion Mechanism: Original SAGE Adaptive Convex Fusion:
+#     output = alpha * main_output + (1 - alpha) * Dropout(expert_output)
+#     with learnable alpha parameter per SageLayer (initialized at 0.9, clamped [0.1, 1.0])
+# Protocol: Pure Two-Stage (35 epochs: Stage 1 = 17, Stage 2 = 18, BS14, 448x448, seed=42)
+# ==============================================================================
+
+model: B2
+num_transformer_layers: 4
+p3_mode: "A"
+use_cgsr: false
+cgsr: false
+use_point_rend: false
+seed: 42
+img_size: 448
+batch_size: 14
+num_workers: 2
+epochs: 35
+stage1_epochs: 17
+warmup_epochs: 3
+patience: 6
+two_stage: true
+lr: 1e-4
+sage_lr: 2e-4
+p3_lr: 1e-4
+gamma_init: 0.01
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
+stage2_p3_lr: 1e-4
+output_dir: "/content/runs/CandidateB_NoASDW_AdaptiveFusion"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+sage_config:
+  top_k: 2
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+  fusion_type: "adaptive"
+  adaptive_alpha: 0.9
+
+root_dir: "/content/dataset/Crack500"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"
