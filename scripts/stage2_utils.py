@@ -211,28 +211,55 @@ def restore_rng_states(
     5. DataLoader torch.Generator state
     """
     if 'rng_state' in rng_data and rng_data['rng_state'] is not None:
-        torch.set_rng_state(rng_data['rng_state'])
-        if logger:
-            logger.info("Restored torch CPU RNG state.")
+        try:
+            state = rng_data['rng_state']
+            if isinstance(state, torch.Tensor):
+                state = state.cpu().to(torch.uint8)
+            torch.set_rng_state(state)
+            if logger:
+                logger.info("Restored torch CPU RNG state.")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not restore torch CPU RNG state: {e}")
 
     if torch.cuda.is_available() and rng_data.get('cuda_rng_state_all') is not None:
-        torch.cuda.set_rng_state_all(rng_data['cuda_rng_state_all'])
-        if logger:
-            logger.info("Restored torch CUDA RNG state.")
+        try:
+            cuda_states = rng_data['cuda_rng_state_all']
+            if isinstance(cuda_states, list):
+                cuda_states = [s.cpu().to(torch.uint8) if isinstance(s, torch.Tensor) else s for s in cuda_states]
+            elif isinstance(cuda_states, torch.Tensor):
+                cuda_states = cuda_states.cpu().to(torch.uint8)
+            torch.cuda.set_rng_state_all(cuda_states)
+            if logger:
+                logger.info("Restored torch CUDA RNG state.")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not restore torch CUDA RNG state: {e}")
 
     if rng_data.get('numpy_rng_state') is not None:
-        np.random.set_state(rng_data['numpy_rng_state'])
-        if logger:
-            logger.info("Restored NumPy RNG state.")
+        try:
+            np.random.set_state(rng_data['numpy_rng_state'])
+            if logger:
+                logger.info("Restored NumPy RNG state.")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not restore NumPy RNG state: {e}")
 
     if rng_data.get('python_rng_state') is not None:
-        random.setstate(rng_data['python_rng_state'])
-        if logger:
-            logger.info("Restored Python RNG state.")
+        try:
+            random.setstate(rng_data['python_rng_state'])
+            if logger:
+                logger.info("Restored Python RNG state.")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not restore Python RNG state: {e}")
 
     if generator is not None and 'dataloader_generator_state' in rng_data and rng_data['dataloader_generator_state'] is not None:
         try:
-            generator.set_state(rng_data['dataloader_generator_state'])
+            gen_state = rng_data['dataloader_generator_state']
+            if isinstance(gen_state, torch.Tensor):
+                gen_state = gen_state.cpu().to(torch.uint8)
+            generator.set_state(gen_state)
             if logger:
                 logger.info("Restored DataLoader generator state from checkpoint.")
         except Exception as e:
