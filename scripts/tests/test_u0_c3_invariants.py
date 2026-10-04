@@ -19,9 +19,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sage_lite_dir = os.path.join(project_root, "SAGE_LITE")
-for p in [project_root, sage_lite_dir]:
-    if p not in sys.path:
+cand_roots = [
+    project_root,
+    os.path.abspath(os.path.join(project_root, "..")),
+    os.getcwd(),
+    "/content",
+    "/content/SAGE_LITE",
+]
+for p in cand_roots:
+    if os.path.isdir(p) and p not in sys.path:
         sys.path.insert(0, p)
 
 from sage.networks import create_b2_unet, DCInitStem, init_dc_stem_from_pretrained
@@ -31,12 +37,16 @@ class TestU0C3Invariants(unittest.TestCase):
     def setUp(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.expected_ckpt_hash = "147f784021414efd0db514aa6dae94585fece820e88f584e436fc65de851fb66"
-        self.ckpt_path = os.path.join(
-            project_root,
-            "results",
-            "checkpoints",
-            "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth",
-        )
+        
+        rel_subpath = os.path.join("results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth")
+        self.ckpt_path = None
+        for root in cand_roots:
+            candidate = os.path.join(root, rel_subpath)
+            if os.path.exists(candidate):
+                self.ckpt_path = candidate
+                break
+        if self.ckpt_path is None:
+            self.ckpt_path = os.path.join(project_root, rel_subpath)
 
     def test_01_checkpoint_hash_integrity(self):
         """Verifies base checkpoint SHA256 matches expected locked hash."""
