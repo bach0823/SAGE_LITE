@@ -622,6 +622,36 @@ def main():
     print(f"Running on Device: {device}")
     os.makedirs(args.out_dir, exist_ok=True)
 
+    # Automatically resolve checkpoint path across possible directory structures
+    if not os.path.exists(args.checkpoint):
+        possible_ckpt_paths = [
+            os.path.join("/content", args.checkpoint.lstrip("/")),
+            os.path.join("/content/SAGE_LITE", args.checkpoint.lstrip("/")),
+            os.path.join("/content", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"),
+            os.path.join("/content/SAGE_LITE", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"),
+            os.path.join(project_root, args.checkpoint),
+            os.path.join(project_root, "..", args.checkpoint),
+            os.path.join("/content", "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"),
+            os.path.join("/content/SAGE_LITE", "results", "checkpoints", "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"),
+        ]
+        found = False
+        for cand in possible_ckpt_paths:
+            if os.path.exists(cand):
+                print(f"Discovered checkpoint at: {cand}")
+                args.checkpoint = cand
+                found = True
+                break
+        if not found:
+            # Try to search recursively in /content
+            print(f"Checkpoint not found at '{args.checkpoint}'. Searching /content for *.pth...")
+            matched_ckpts = glob.glob("/content/**/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth", recursive=True)
+            if matched_ckpts:
+                args.checkpoint = matched_ckpts[0]
+                print(f"Found candidate checkpoint: {args.checkpoint}")
+            else:
+                matched_all_pth = glob.glob("/content/**/*.pth", recursive=True)
+                print(f"Available .pth files found in /content: {matched_all_pth}")
+
     # -----------------------------------------------------------------------
     # Step 0: Checkpoint & Pretrained Invariant Verification
     # -----------------------------------------------------------------------
