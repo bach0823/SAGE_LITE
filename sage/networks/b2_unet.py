@@ -89,6 +89,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         point_rend_subdivision_points: int = 8192,
         use_oriented_strip_pooling: bool = False,
         use_tangent_head: bool = False,
+        use_s2_gate: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -104,6 +105,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.point_rend_subdivision_points = point_rend_subdivision_points
         self.use_oriented_strip_pooling = use_oriented_strip_pooling
         self.use_tangent_head = use_tangent_head
+        self.use_s2_gate = use_s2_gate
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -121,7 +123,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             pretrained=pretrained,
         )
 
-        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head / CGSR / PointRend)
+        # 3. Decoder: Standard 3x3 UNet Decoder with skip connections (or PLU-Head / CGSR / PointRend / S2-Gate)
         self.decoder = UNetDecoder(
             encoder_channels=self.backbone.encoder_channels,
             num_classes=num_classes,
@@ -135,6 +137,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             point_rend_subdivision_points=point_rend_subdivision_points,
             use_oriented_strip_pooling=use_oriented_strip_pooling,
             use_tangent_head=use_tangent_head,
+            use_s2_gate=use_s2_gate,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -472,6 +475,7 @@ def create_b2_unet(
     point_rend_subdivision_points: int = 8192,
     use_oriented_strip_pooling: bool = False,
     use_tangent_head: bool = False,
+    use_s2_gate: bool = False,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -495,5 +499,6 @@ def create_b2_unet(
         point_rend_subdivision_points=point_rend_subdivision_points,
         use_oriented_strip_pooling=use_oriented_strip_pooling,
         use_tangent_head=use_tangent_head,
+        use_s2_gate=use_s2_gate,
     )
 

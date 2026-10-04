@@ -40,6 +40,7 @@ def make_conv3x3(in_ch: int, out_ch: int, use_dwsc: bool = False) -> nn.Module:
 
 
 from .cgsr import ContextGuidedStage1SkipRefinement
+from .s2_gate import S2GateModule
 from .point_rend import (
     PointRendHead,
     sample_training_points,
@@ -243,6 +244,7 @@ class UNetDecoder(nn.Module):
         point_rend_subdivision_points: int = 8192,
         use_oriented_strip_pooling: bool = False,
         use_tangent_head: bool = False,
+        use_s2_gate: bool = False,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -257,6 +259,12 @@ class UNetDecoder(nn.Module):
         self.point_rend_subdivision_points = point_rend_subdivision_points
         self.use_oriented_strip_pooling = use_oriented_strip_pooling
         self.use_tangent_head = use_tangent_head
+        self.use_s2_gate = use_s2_gate
+
+        if self.use_s2_gate:
+            self.s2_gate = S2GateModule(s2_channels=192, skip_channels=96)
+        else:
+            self.s2_gate = None
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
@@ -363,13 +371,20 @@ class UNetDecoder(nn.Module):
         )
 
         x_dec = bottleneck
+        last_gate_alpha = None
 
         for i, block in enumerate(self.decoder_blocks):
             skip = reversed_skips[i]
+            # U1-S2G: Gate skip S1 (56x56) using S2 context x_dec (28x28) prior to Block 1
+            if i == 1 and self.s2_gate is not None:
+                skip, last_gate_alpha = self.s2_gate(x_dec, skip)
             x_dec = block(x_dec, skip)
             # Experiment A: Oriented Strip Pooling at Block 1 (56x56 resolution)
             if i == 1 and self.strip_pool_56 is not None:
                 x_dec = self.strip_pool_56(x_dec)
+
+        # Cache gate alpha for diagnostics and audit
+        self.last_gate_alpha = last_gate_alpha
 
         # Experiment B: Tangent Field prediction from final decoder features (112x112)
         pred_tangent = None

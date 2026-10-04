@@ -9,6 +9,7 @@ from .b2_unet import B2ConvNeXtViTUNet, create_b2_unet
 from .sage_injection import inject_sage_layers, pre_populate_sa_hubs
 from .wrappers import TupleSafeWrapper, extract_convnext_blocks
 from .dc_init_stem import DCInitStem, init_dc_stem_from_pretrained
+from .s2_gate import S2GateModule
 
 __all__ = [
     "ConvNeXtV2ViTHybrid",
@@ -27,4 +28,5 @@ __all__ = [
     "extract_convnext_blocks",
     "DCInitStem",
     "init_dc_stem_from_pretrained",
+    "S2GateModule",
 ]
