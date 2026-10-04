@@ -205,6 +205,8 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
     point_rend_mid_channels = int(cfg.get("point_rend_mid_channels", 128))
     point_rend_train_points = int(cfg.get("point_rend_train_points", 2048))
     point_rend_subdivision_points = int(cfg.get("point_rend_subdivision_points", 8192))
+    use_oriented_strip_pooling = cfg.get("use_oriented_strip_pooling", False)
+    use_tangent_head = cfg.get("use_tangent_head", False) or (float(cfg.get("tangent_weight", 0.0)) > 0.0)
 
     model = create_b2_unet(
         num_transformer_layers=num_layers,
@@ -218,6 +220,8 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         point_rend_mid_channels=point_rend_mid_channels,
         point_rend_train_points=point_rend_train_points,
         point_rend_subdivision_points=point_rend_subdivision_points,
+        use_oriented_strip_pooling=use_oriented_strip_pooling,
+        use_tangent_head=use_tangent_head,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)

@@ -66,17 +66,24 @@ def get_transformations(img_size, crop_mode='random'):
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ]
+    color_list = [
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+        A.GaussianBlur(blur_limit=3, p=0.3),
+        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ToTensorV2(),
+    ]
     
     train_transform = A.Compose(base_crop + aug_list)
-    crop_transform = A.Compose(base_crop)
+    crop_transform = A.Compose(base_crop, additional_targets={'tangent': 'mask'})
     aug_transform = A.Compose(aug_list)
+    color_transform = A.Compose(color_list)
     
     val_transforms = A.Compose(val_crop + [
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])
     
-    return train_transform, val_transforms, crop_transform, aug_transform
+    return train_transform, val_transforms, crop_transform, aug_transform, color_transform
 
 class UniversalMedicalDataset(Dataset):
     """
@@ -166,7 +173,7 @@ class UniversalMedicalDataset(Dataset):
         if transform:
             self.transform = transform
         else:
-            train_t, val_t, _, _ = get_transformations(image_size)
+            train_t, val_t, _, _, _ = get_transformations(image_size)
             self.transform = train_t if split == 'train' else val_t
 
     def __len__(self):
@@ -269,6 +276,19 @@ class ConfigurableMedicalDataset(Dataset):
                 stem = os.path.splitext(f)[0]
                 mask_map[stem] = os.path.join(root, f)
         
+        # Check for tangent field ground truth
+        tangent_rel = self.config.get(split, {}).get('tangents', None) or self.config.get('tangents', None)
+        tangent_map = {}
+        if tangent_rel:
+            tangent_dir = tangent_rel if os.path.isabs(tangent_rel) else os.path.join(self.root_dir, tangent_rel)
+            if os.path.exists(tangent_dir):
+                for root, _, files in os.walk(tangent_dir):
+                    for f in files:
+                        if f.endswith('.npz'):
+                            stem = os.path.splitext(f)[0]
+                            tangent_map[stem] = os.path.join(root, f)
+                print(f"[ConfigurableDataset] Loaded {split.upper()} Tangent GT: {len(tangent_map)} files from {tangent_dir}")
+
         # Iterate images and find matching masks
         for root, _, files in os.walk(img_dir):
             for f in files:
@@ -281,11 +301,14 @@ class ConfigurableMedicalDataset(Dataset):
                     expected_mask_stem = img_stem + self.mask_suffix
                     
                     if expected_mask_stem in mask_map:
-                        self.samples.append({
+                        sample_dict = {
                             'image': os.path.join(root, f),
                             'label': mask_map[expected_mask_stem],
                             'case_name': img_stem
-                        })
+                        }
+                        if img_stem in tangent_map:
+                            sample_dict['tangent'] = tangent_map[img_stem]
+                        self.samples.append(sample_dict)
         
         if len(self.samples) == 0:
             raise ValueError(f"No matching pairs found for split '{split}'. Check paths and suffixes.")
@@ -301,12 +324,14 @@ class ConfigurableMedicalDataset(Dataset):
             self.transforms = transform
             self.crop_transform = None
             self.aug_transform = None
+            self.color_transform = None
         else:
             # Default transforms
-            train_t, val_t, crop_t, aug_t = get_transformations(image_size, crop_mode=self.crop_mode)
+            train_t, val_t, crop_t, aug_t, color_t = get_transformations(image_size, crop_mode=self.crop_mode)
             self.transforms = train_t if split == 'train' else val_t
             self.crop_transform = crop_t if split == 'train' else None
             self.aug_transform = aug_t if split == 'train' else None
+            self.color_transform = color_t if split == 'train' else None
 
     def __len__(self):
         return len(self.samples)
@@ -328,9 +353,19 @@ class ConfigurableMedicalDataset(Dataset):
                 mask  = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
                 mask  = (mask > 0).astype(np.uint8)
 
+                tangent = None
+                if 'tangent' in sample:
+                    tan_data = np.load(sample['tangent'])
+                    vx = tan_data['vx'].astype(np.float32)
+                    vy = tan_data['vy'].astype(np.float32)
+                    tangent = np.stack([vx, vy], axis=-1)
+
                 success = False
                 for _ in range(20):
-                    cropped   = self.crop_transform(image=image, mask=mask)
+                    if tangent is not None:
+                        cropped = self.crop_transform(image=image, mask=mask, tangent=tangent)
+                    else:
+                        cropped = self.crop_transform(image=image, mask=mask)
                     fg_pixels = (cropped['mask'] > 0).sum()
                     if fg_pixels >= 20:
                         success = True
@@ -340,7 +375,54 @@ class ConfigurableMedicalDataset(Dataset):
                     idx = random.randint(0, len(self.samples) - 1)
                     continue
 
-                augmented = self.aug_transform(image=cropped['image'], mask=cropped['mask'])
+                cropped_img = cropped['image']
+                cropped_mask = cropped['mask']
+                cropped_tan = cropped.get('tangent', None)
+
+                if cropped_tan is not None:
+                    # Synchronous geometric augmentations with exact double-angle vector sign tracking
+                    # 1. Horizontal Flip (50% prob)
+                    if random.random() < 0.5:
+                        cropped_img = np.ascontiguousarray(np.fliplr(cropped_img))
+                        cropped_mask = np.ascontiguousarray(np.fliplr(cropped_mask))
+                        cropped_tan = np.ascontiguousarray(np.fliplr(cropped_tan))
+                        cropped_tan[:, :, 1] = -cropped_tan[:, :, 1]  # Vy = sin(2*theta) negated
+
+                    # 2. Vertical Flip (50% prob)
+                    if random.random() < 0.5:
+                        cropped_img = np.ascontiguousarray(np.flipud(cropped_img))
+                        cropped_mask = np.ascontiguousarray(np.flipud(cropped_mask))
+                        cropped_tan = np.ascontiguousarray(np.flipud(cropped_tan))
+                        cropped_tan[:, :, 1] = -cropped_tan[:, :, 1]  # Vy = sin(2*theta) negated
+
+                    # 3. Random Rotate 90 (50% prob)
+                    if random.random() < 0.5:
+                        k = random.choice([1, 2, 3])
+                        cropped_img = np.ascontiguousarray(np.rot90(cropped_img, k))
+                        cropped_mask = np.ascontiguousarray(np.rot90(cropped_mask, k))
+                        cropped_tan = np.ascontiguousarray(np.rot90(cropped_tan, k))
+                        if k in (1, 3):  # 90 deg or 270 deg: Vx -> -Vx, Vy -> -Vy
+                            cropped_tan = -cropped_tan
+
+                    # Apply color augmentations & normalization
+                    if self.color_transform:
+                        aug = self.color_transform(image=cropped_img, mask=cropped_mask)
+                        image_out = aug['image']
+                        label_out = aug['mask']
+                    else:
+                        image_out = torch.from_numpy(cropped_img).permute(2, 0, 1).float() / 255.0
+                        label_out = torch.from_numpy(cropped_mask)
+
+                    tangent_out = torch.from_numpy(cropped_tan).permute(2, 0, 1).float()
+                    return {
+                        'image':     image_out,
+                        'label':     label_out.long() if label_out.dtype != torch.long else label_out,
+                        'tangent':   tangent_out,
+                        'case_name': sample['case_name'],
+                    }
+
+                # Standard augmentation path when tangent is not present
+                augmented = self.aug_transform(image=cropped_img, mask=cropped_mask)
                 image_out = augmented['image']
                 label_out = augmented['mask']
                 if label_out.dtype != torch.long:
@@ -369,7 +451,22 @@ class ConfigurableMedicalDataset(Dataset):
         if getattr(self, 'crop_mode', 'random') == 'resize':
             image, mask = pad_to_square(image, mask, self.image_size)
 
-        if self.transforms:
+        tangent_tensor = None
+        if 'tangent' in sample:
+            tan_data = np.load(sample['tangent'])
+            vx = tan_data['vx'].astype(np.float32)
+            vy = tan_data['vy'].astype(np.float32)
+            tangent = np.stack([vx, vy], axis=-1)
+            if self.transforms:
+                aug_t = self.transforms(image=image, mask=mask, tangent=tangent)
+                image_out = aug_t['image']
+                label_out = aug_t['mask']
+                tangent_tensor = torch.from_numpy(aug_t['tangent']).permute(2, 0, 1).float()
+            else:
+                image_out = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+                label_out = torch.from_numpy(mask).long()
+                tangent_tensor = torch.from_numpy(tangent).permute(2, 0, 1).float()
+        elif self.transforms:
             augmented = self.transforms(image=image, mask=mask)
             image_out = augmented['image']
             label_out = augmented['mask']
@@ -379,11 +476,14 @@ class ConfigurableMedicalDataset(Dataset):
 
         if label_out.dtype != torch.long:
             label_out = label_out.long()
-        return {
+        ret = {
             'image':     image_out,
             'label':     label_out,
             'case_name': sample['case_name'],
         }
+        if tangent_tensor is not None:
+            ret['tangent'] = tangent_tensor
+        return ret
 
 
 def get_dataset_from_config(config_path, split='train', image_size=512):

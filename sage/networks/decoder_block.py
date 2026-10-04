@@ -241,6 +241,8 @@ class UNetDecoder(nn.Module):
         point_rend_mid_channels: int = 128,
         point_rend_train_points: int = 2048,
         point_rend_subdivision_points: int = 8192,
+        use_oriented_strip_pooling: bool = False,
+        use_tangent_head: bool = False,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -253,6 +255,8 @@ class UNetDecoder(nn.Module):
         self.point_rend_mid_channels = point_rend_mid_channels
         self.point_rend_train_points = point_rend_train_points
         self.point_rend_subdivision_points = point_rend_subdivision_points
+        self.use_oriented_strip_pooling = use_oriented_strip_pooling
+        self.use_tangent_head = use_tangent_head
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
@@ -310,12 +314,31 @@ class UNetDecoder(nn.Module):
         else:
             self.point_rend_head = None
 
+        # Experiment A: Oriented Strip Pooling at Block 1 (56x56 resolution, Stage 1 skip, 96 channels)
+        if self.use_oriented_strip_pooling:
+            from .strip_pooling import OrientedStripPooling
+            self.strip_pool_56 = OrientedStripPooling(channels=reversed_channels[2])
+        else:
+            self.strip_pool_56 = None
+
+        # Experiment B: Tangent Field Auxiliary Head at Final 112x112 features (48 channels)
+        if self.use_tangent_head:
+            self.tangent_head = nn.Sequential(
+                make_conv3x3(final_channels, head_mid_channels, use_dwsc=use_dwsc),
+                nn.BatchNorm2d(head_mid_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(head_mid_channels, 2, kernel_size=1),
+            )
+        else:
+            self.tangent_head = None
+
     def forward(
         self,
         bottleneck: torch.Tensor,
         skips: List[torch.Tensor],
         target_size: Optional[Tuple[int, int]] = (448, 448),
         return_point_rend_dict: bool = False,
+        return_tangent: bool = False,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass through UNet Decoder.
@@ -328,9 +351,10 @@ class UNetDecoder(nn.Module):
                 - skips[2]: Stage 2 (B, 192, 28, 28)
             target_size (Tuple[int, int], optional): Final image resolution (default: (448, 448)).
             return_point_rend_dict (bool): If True, returns dict with point training tensors.
+            return_tangent (bool): If True, returns dict with predicted tangent field.
 
         Returns:
-            torch.Tensor or Dict: Refined logits or training point dictionary.
+            torch.Tensor or Dict: Refined logits or training point / tangent dictionary.
         """
         # Reverse skips to deep-to-shallow order: [Stage 2 (192), Stage 1 (96), Stage 0 (48)]
         reversed_skips = list(reversed(skips))
@@ -343,6 +367,23 @@ class UNetDecoder(nn.Module):
         for i, block in enumerate(self.decoder_blocks):
             skip = reversed_skips[i]
             x_dec = block(x_dec, skip)
+            # Experiment A: Oriented Strip Pooling at Block 1 (56x56 resolution)
+            if i == 1 and self.strip_pool_56 is not None:
+                x_dec = self.strip_pool_56(x_dec)
+
+        # Experiment B: Tangent Field prediction from final decoder features (112x112)
+        pred_tangent = None
+        if self.use_tangent_head and self.tangent_head is not None:
+            raw_tan = self.tangent_head(x_dec)
+            if target_size is not None and raw_tan.shape[2:] != target_size:
+                raw_tan = F.interpolate(
+                    raw_tan,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            # Normalize to unit vector in double-angle space
+            pred_tangent = F.normalize(raw_tan, p=2, dim=1)
 
         if self.use_point_rend:
             # 1. Coarse prediction at 112x112
@@ -363,12 +404,17 @@ class UNetDecoder(nn.Module):
                     align_corners=False,
                 )
                 if return_point_rend_dict:
-                    return {
+                    res = {
                         "logits": coarse_upsampled,
                         "coarse_logits": coarse_logits,
                         "point_logits": point_logits,
                         "point_coords": point_coords,
                     }
+                    if return_tangent and pred_tangent is not None:
+                        res["pred_tangent"] = pred_tangent
+                    return res
+                if return_tangent and pred_tangent is not None:
+                    return {"logits": coarse_upsampled, "pred_tangent": pred_tangent}
                 return coarse_upsampled
             else:
                 # Evaluation mode: adaptive subdivision refinement
@@ -379,6 +425,8 @@ class UNetDecoder(nn.Module):
                     target_size=target_size,
                     num_subdivision_points=self.point_rend_subdivision_points,
                 )
+                if return_tangent and pred_tangent is not None:
+                    return {"logits": logits, "pred_tangent": pred_tangent}
                 return logits
 
         if self.use_plu_head:
@@ -396,6 +444,8 @@ class UNetDecoder(nn.Module):
                     align_corners=False,
                 )
 
+        if return_tangent and pred_tangent is not None:
+            return {"logits": logits, "pred_tangent": pred_tangent}
         return logits
 
 

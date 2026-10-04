@@ -87,6 +87,8 @@ class B2ConvNeXtViTUNet(nn.Module):
         point_rend_mid_channels: int = 128,
         point_rend_train_points: int = 2048,
         point_rend_subdivision_points: int = 8192,
+        use_oriented_strip_pooling: bool = False,
+        use_tangent_head: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -100,6 +102,8 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.point_rend_mid_channels = point_rend_mid_channels
         self.point_rend_train_points = point_rend_train_points
         self.point_rend_subdivision_points = point_rend_subdivision_points
+        self.use_oriented_strip_pooling = use_oriented_strip_pooling
+        self.use_tangent_head = use_tangent_head
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -129,6 +133,8 @@ class B2ConvNeXtViTUNet(nn.Module):
             point_rend_mid_channels=point_rend_mid_channels,
             point_rend_train_points=point_rend_train_points,
             point_rend_subdivision_points=point_rend_subdivision_points,
+            use_oriented_strip_pooling=use_oriented_strip_pooling,
+            use_tangent_head=use_tangent_head,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -188,6 +194,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         self,
         x: torch.Tensor,
         return_point_rend_dict: bool = False,
+        return_tangent: bool = False,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass satisfying Strict Tensor Contract (Lock #1).
@@ -195,9 +202,10 @@ class B2ConvNeXtViTUNet(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (B, 3, H, W).
             return_point_rend_dict (bool): Whether to return training point dict if PointRend active.
+            return_tangent (bool): Whether to return predicted tangent field if TangentHead active.
             
         Returns:
-            torch.Tensor or Dict: Segmentation logits of shape (B, num_classes, H, W) or point dict.
+            torch.Tensor or Dict: Segmentation logits of shape (B, num_classes, H, W) or output dict.
         """
         target_size = (x.shape[2], x.shape[3])
 
@@ -212,6 +220,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             skips=skips,
             target_size=target_size,
             return_point_rend_dict=return_point_rend_dict,
+            return_tangent=return_tangent,
         )
 
         return out
@@ -228,21 +237,26 @@ class B2ConvNeXtViTUNet(nn.Module):
                 - 'logits': Segmentation logits (B, num_classes, H, W).
                 - 'routing_infos': Dict with 'cnn', 'transformer', and 'all' lists.
                 - (optional) 'coarse_logits', 'point_logits', 'point_coords' if PointRend in training.
+                - (optional) 'pred_tangent' if TangentHead in training.
         """
-        # 1. Normal forward pass (request point_rend_dict if PointRend is in training mode)
-        if self.decoder.use_point_rend and self.training:
-            dec_out = self.forward(x, return_point_rend_dict=True)
+        # 1. Normal forward pass (request point_rend_dict if PointRend is in training mode, or tangent if TangentHead active)
+        return_tangent = self.decoder.use_tangent_head and self.training
+        return_point_rend_dict = self.decoder.use_point_rend and self.training
+
+        if return_point_rend_dict or return_tangent:
+            dec_out = self.forward(x, return_point_rend_dict=return_point_rend_dict, return_tangent=return_tangent)
             if isinstance(dec_out, dict):
                 logits = dec_out["logits"]
                 coarse_logits = dec_out.get("coarse_logits")
                 point_logits = dec_out.get("point_logits")
                 point_coords = dec_out.get("point_coords")
+                pred_tangent = dec_out.get("pred_tangent")
             else:
                 logits = dec_out
-                coarse_logits = point_logits = point_coords = None
+                coarse_logits = point_logits = point_coords = pred_tangent = None
         else:
             logits = self.forward(x)
-            coarse_logits = point_logits = point_coords = None
+            coarse_logits = point_logits = point_coords = pred_tangent = None
 
         # 2. Harvest routing info from all CNN stages and ViT blocks
         cnn_routing_infos = []
@@ -269,6 +283,8 @@ class B2ConvNeXtViTUNet(nn.Module):
             res["coarse_logits"] = coarse_logits
             res["point_logits"] = point_logits
             res["point_coords"] = point_coords
+        if pred_tangent is not None:
+            res["pred_tangent"] = pred_tangent
 
         return res
 
@@ -454,6 +470,8 @@ def create_b2_unet(
     point_rend_mid_channels: int = 128,
     point_rend_train_points: int = 2048,
     point_rend_subdivision_points: int = 8192,
+    use_oriented_strip_pooling: bool = False,
+    use_tangent_head: bool = False,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -475,5 +493,7 @@ def create_b2_unet(
         point_rend_mid_channels=point_rend_mid_channels,
         point_rend_train_points=point_rend_train_points,
         point_rend_subdivision_points=point_rend_subdivision_points,
+        use_oriented_strip_pooling=use_oriented_strip_pooling,
+        use_tangent_head=use_tangent_head,
     )
 

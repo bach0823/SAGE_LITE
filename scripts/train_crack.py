@@ -480,6 +480,7 @@ class CrackBinaryLoss(torch.nn.Module):
         separation_weight=0.0,
         separation_max_gap=8.0,
         separation_min_area=5,
+        tangent_weight=0.0,
         smooth=1e-5
     ):
         super().__init__()
@@ -489,6 +490,7 @@ class CrackBinaryLoss(torch.nn.Module):
         self.margin_weight = margin_weight
         self.cldice_weight = cldice_weight
         self.separation_weight = separation_weight
+        self.tangent_weight = tangent_weight
         self.smooth = smooth
         self.bce = torch.nn.BCEWithLogitsLoss()
         if self.boundary_weight > 0.0:
@@ -508,7 +510,7 @@ class CrackBinaryLoss(torch.nn.Module):
         else:
             self.separation_loss = None
 
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, pred_tangent=None, gt_tangent=None):
         if targets.dim() == 3:
             targets = targets.unsqueeze(1)
         targets = targets.float()
@@ -534,6 +536,13 @@ class CrackBinaryLoss(torch.nn.Module):
         if self.separation_loss is not None:
             sep_loss = self.separation_loss(logits, targets)
             total_loss = total_loss + self.separation_weight * sep_loss
+        if self.tangent_weight > 0.0 and pred_tangent is not None and gt_tangent is not None:
+            # Double-angle cos2 similarity: (pred_v * gt_v).sum(dim=1)
+            cos2_sim = (pred_tangent * gt_tangent).sum(dim=1)
+            crack_mask = (targets.squeeze(1) > 0)
+            if crack_mask.any():
+                t_loss = (1.0 - cos2_sim)[crack_mask].mean()
+                total_loss = total_loss + self.tangent_weight * t_loss
 
         return total_loss
 
@@ -667,6 +676,8 @@ def main(args):
         vit_depth = int(config.get('num_transformer_layers', 12))
         sage_cfg = config.get('sage_config', {})
         use_plu_head = config.get('use_plu_head', False)
+        use_oriented_strip_pooling = config.get('use_oriented_strip_pooling', False)
+        use_tangent_head = config.get('use_tangent_head', False) or (float(config.get('tangent_weight', 0.0)) > 0.0)
         model = create_b2_unet(
             num_classes=1,
             img_size=img_size,
@@ -681,8 +692,10 @@ def main(args):
             point_rend_mid_channels=point_rend_mid_channels,
             point_rend_train_points=point_rend_train_points,
             point_rend_subdivision_points=point_rend_subdivision_points,
+            use_oriented_strip_pooling=use_oriented_strip_pooling,
+            use_tangent_head=use_tangent_head,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}, strip_pool={use_oriented_strip_pooling}, tangent_head={use_tangent_head}")
 
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
@@ -740,6 +753,7 @@ def main(args):
     separation_weight = float(config.get('separation_weight', 0.0))
     separation_max_gap = float(config.get('separation_max_gap', 8.0))
     separation_min_area = int(config.get('separation_min_area', 5))
+    tangent_weight = float(config.get('tangent_weight', 0.0))
     criterion = CrackBinaryLoss(
         bce_weight=1.0,
         dice_weight=1.5,
@@ -752,6 +766,7 @@ def main(args):
         separation_weight=separation_weight,
         separation_max_gap=separation_max_gap,
         separation_min_area=separation_min_area,
+        tangent_weight=tangent_weight,
     )
     if boundary_iou_weight > 0.0:
         logger.info(f"Boundary IoU Loss enabled: weight={boundary_iou_weight}, dilation={boundary_iou_dilation}")
@@ -761,6 +776,8 @@ def main(args):
         logger.info(f"Soft-clDice Loss enabled: weight={cldice_weight}, iters={cldice_iters}")
     if separation_weight > 0.0:
         logger.info(f"Inter-Component Separation Loss enabled: weight={separation_weight}, max_gap={separation_max_gap}px, min_area={separation_min_area}px")
+    if tangent_weight > 0.0:
+        logger.info(f"Tangent Field Auxiliary Loss enabled: weight={tangent_weight}")
     if use_point_rend:
         from sage.networks.point_rend import PointRendLoss
         criterion = PointRendLoss(base_criterion=criterion, point_loss_weight=point_loss_weight)
@@ -851,6 +868,9 @@ def main(args):
             for batch in pbar:
                 images = batch['image'].to(device, non_blocking=True)
                 labels = batch['label'].to(device, non_blocking=True)
+                gt_tangent = batch.get('tangent', None)
+                if gt_tangent is not None:
+                    gt_tangent = gt_tangent.to(device, non_blocking=True)
 
                 optimizer.zero_grad(set_to_none=True)
 
@@ -865,6 +885,8 @@ def main(args):
                         forward_out = logits
                         lb_loss = torch.tensor(0.0, device=device)
 
+                    pred_tangent = forward_out.get('pred_tangent', None) if isinstance(forward_out, dict) else None
+
                     if isinstance(forward_out, dict) and 'point_logits' in forward_out and hasattr(criterion, 'bce_point'):
                         seg_loss = criterion(
                             logits=logits,
@@ -872,9 +894,11 @@ def main(args):
                             point_logits=forward_out.get('point_logits'),
                             point_coords=forward_out.get('point_coords'),
                             coarse_logits=forward_out.get('coarse_logits'),
+                            pred_tangent=pred_tangent,
+                            gt_tangent=gt_tangent,
                         )
                     else:
-                        seg_loss = criterion(logits, labels)
+                        seg_loss = criterion(logits, labels, pred_tangent=pred_tangent, gt_tangent=gt_tangent)
                     loss = seg_loss + 1.0 * lb_loss
 
 
@@ -923,6 +947,10 @@ def main(args):
                 g0, g1 = get_p3_gamma_values(model)
                 lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
             logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
+            if hasattr(model, 'decoder') and hasattr(model.decoder, 'strip_pool_56') and model.decoder.strip_pool_56 is not None:
+                g_mean, g_std = model.decoder.strip_pool_56.get_gate_stats()
+                if g_mean is not None:
+                    logger.info(f"OrientedStripPooling Gate mean: {g_mean:.4f}, std: {g_std:.4f}")
             
             is_best = False
             if val_dice > best_dice + 1e-4:
@@ -1212,6 +1240,9 @@ def main(args):
             for batch in pbar:
                 images = batch['image'].to(device, non_blocking=True)
                 labels = batch['label'].to(device, non_blocking=True)
+                gt_tangent = batch.get('tangent', None)
+                if gt_tangent is not None:
+                    gt_tangent = gt_tangent.to(device, non_blocking=True)
                 
                 optimizer.zero_grad(set_to_none=True)
                 
@@ -1226,6 +1257,8 @@ def main(args):
                         forward_out = logits
                         lb_loss = torch.tensor(0.0, device=device)
 
+                    pred_tangent = forward_out.get('pred_tangent', None) if isinstance(forward_out, dict) else None
+
                     if isinstance(forward_out, dict) and 'point_logits' in forward_out and hasattr(criterion, 'bce_point'):
                         seg_loss = criterion(
                             logits=logits,
@@ -1233,9 +1266,11 @@ def main(args):
                             point_logits=forward_out.get('point_logits'),
                             point_coords=forward_out.get('point_coords'),
                             coarse_logits=forward_out.get('coarse_logits'),
+                            pred_tangent=pred_tangent,
+                            gt_tangent=gt_tangent,
                         )
                     else:
-                        seg_loss = criterion(logits, labels)
+                        seg_loss = criterion(logits, labels, pred_tangent=pred_tangent, gt_tangent=gt_tangent)
                     loss = seg_loss + 1.0 * lb_loss
 
                     
@@ -1305,6 +1340,10 @@ def main(args):
                         lr_str += f" | CGSR: b={g_bias:.2f}, W={g_wnorm:.3f}"
 
             logger.info(f"Epoch {epoch}/{max_stage_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
+            if hasattr(model, 'decoder') and hasattr(model.decoder, 'strip_pool_56') and model.decoder.strip_pool_56 is not None:
+                g_mean, g_std = model.decoder.strip_pool_56.get_gate_stats()
+                if g_mean is not None:
+                    logger.info(f"OrientedStripPooling Gate mean: {g_mean:.4f}, std: {g_std:.4f}")
             
             is_best_stage = False
             if val_dice > best_stage_dice + 1e-4:
