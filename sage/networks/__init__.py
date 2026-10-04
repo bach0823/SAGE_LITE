@@ -8,6 +8,7 @@ from .b1_unet import B1ConvNeXtViTUNet, create_b1_unet
 from .b2_unet import B2ConvNeXtViTUNet, create_b2_unet
 from .sage_injection import inject_sage_layers, pre_populate_sa_hubs
 from .wrappers import TupleSafeWrapper, extract_convnext_blocks
+from .dc_init_stem import DCInitStem, init_dc_stem_from_pretrained
 
 __all__ = [
     "ConvNeXtV2ViTHybrid",
@@ -24,4 +25,6 @@ __all__ = [
     "pre_populate_sa_hubs",
     "TupleSafeWrapper",
     "extract_convnext_blocks",
+    "DCInitStem",
+    "init_dc_stem_from_pretrained",
 ]
