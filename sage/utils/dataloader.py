@@ -294,6 +294,8 @@ class ConfigurableMedicalDataset(Dataset):
                             stem = os.path.splitext(f)[0]
                             tangent_map[stem] = os.path.join(root, f)
                 print(f"[ConfigurableDataset] Loaded {split.upper()} Tangent GT: {len(tangent_map)} files from {tangent_dir}")
+            else:
+                print(f"[ConfigurableDataset] WARNING: Tangent dir '{tangent_dir}' not found on disk. Run tools/generate_tangent_field.py to generate GT first!")
 
         # Iterate images and find matching masks
         for root, _, files in os.walk(img_dir):
