@@ -530,6 +530,29 @@ def main():
     # -----------------------------------------------------------------------
     # Datasets
     # -----------------------------------------------------------------------
+    cand_data_roots = [
+        args.data_root,
+        "/content/dataset/Crack500",
+        os.path.join(project_root, args.data_root),
+        os.path.join(project_root, "..", "data"),
+        os.path.join(project_root, "..", "dataset", "Crack500"),
+        "/content/SAGE_LITE/datasets/Crack500_ready",
+        "/content/datasets/Crack500_ready",
+        "datasets/Crack500_ready",
+    ]
+    resolved_data_root = None
+    for cand in cand_data_roots:
+        cand_val_img = os.path.join(cand, "val", "images")
+        if os.path.exists(cand_val_img):
+            resolved_data_root = cand
+            break
+
+    if resolved_data_root is not None:
+        args.data_root = resolved_data_root
+        print(f"Discovered and resolved data_root at: {args.data_root}")
+    else:
+        print(f"[Warning] Could not find 'val/images' under search roots. Using requested: {args.data_root}")
+
     train_img_dir = os.path.join(args.data_root, "train", "images")
     train_mask_dir = os.path.join(args.data_root, "train", "masks")
     val_img_dir = os.path.join(args.data_root, "val", "images")
