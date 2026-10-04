@@ -784,22 +784,22 @@ def main():
     print("=" * 80)
 
     events_csv = "results/diagnostics/phase6_bottleneck_path/bottleneck_path_118events.csv"
-    if not os.path.exists(events_csv):
-        alt_ev = os.path.join("..", events_csv)
-        if os.path.exists(alt_ev):
-            events_csv = alt_ev
+    for cand in [events_csv, os.path.join("..", events_csv), os.path.join("/content", events_csv), os.path.join("/content/SAGE_LITE", events_csv), os.path.join(project_root, events_csv)]:
+        if os.path.exists(cand):
+            events_csv = cand
+            break
 
     cgsr_43_csv = "results/Phase6D_CGSR/evaluation_phase6d/cgsr_evaluation_43wider_events.csv"
-    if not os.path.exists(cgsr_43_csv):
-        alt_cgsr = os.path.join("..", cgsr_43_csv)
-        if os.path.exists(alt_cgsr):
-            cgsr_43_csv = alt_cgsr
+    for cand in [cgsr_43_csv, os.path.join("..", cgsr_43_csv), os.path.join("/content", cgsr_43_csv), os.path.join("/content/SAGE_LITE", cgsr_43_csv), os.path.join(project_root, cgsr_43_csv)]:
+        if os.path.exists(cand):
+            cgsr_43_csv = cand
+            break
 
     v1_43_csv = "results/diagnostics/phase6_u1_s2g/s2g_43wider_events.csv"
-    if not os.path.exists(v1_43_csv):
-        alt_v1 = os.path.join("..", v1_43_csv)
-        if os.path.exists(alt_v1):
-            v1_43_csv = alt_v1
+    for cand in [v1_43_csv, os.path.join("..", v1_43_csv), os.path.join("/content", v1_43_csv), os.path.join("/content/SAGE_LITE", v1_43_csv), os.path.join(project_root, v1_43_csv)]:
+        if os.path.exists(cand):
+            v1_43_csv = cand
+            break
 
     cgsr_ref = pd.read_csv(cgsr_43_csv).set_index("event_id") if os.path.exists(cgsr_43_csv) else None
     v1_ref = pd.read_csv(v1_43_csv).set_index("event_id") if os.path.exists(v1_43_csv) else None
