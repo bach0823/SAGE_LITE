@@ -79,6 +79,31 @@ def test_stage_1b_configs_invariants():
     print("[PASS] test_stage_1b_configs_invariants")
 
 
+def test_stage_a1_a2_configs_invariants():
+    """Verify A1+A2 sweep configs exist, have use_plu_head=True, and match specified lambda and d."""
+    expected = {
+        "a1_a2_v1_l025_d2.yaml": {"weight": 0.25, "dilation": 2},
+        "a1_a2_v2_l050_d2.yaml": {"weight": 0.50, "dilation": 2},
+        "a1_a2_v3_l075_d2.yaml": {"weight": 0.75, "dilation": 2},
+    }
+    cfg_dir = os.path.join(PROJECT_ROOT, "configs", "p3_ablation", "phase6_combination")
+    for fname, exp in expected.items():
+        p = os.path.join(cfg_dir, fname)
+        assert os.path.exists(p), f"Config file missing: {p}"
+        with open(p, "r") as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["model"] == "B2"
+        assert cfg["num_transformer_layers"] == 4
+        assert cfg["p3_mode"] == "C"
+        assert cfg["seed"] == 42
+        assert cfg["patience"] == 8
+        assert cfg["use_plu_head"] is True
+        assert abs(cfg["boundary_iou_weight"] - exp["weight"]) < 1e-5
+        assert cfg["boundary_iou_dilation"] == exp["dilation"]
+        assert cfg.get("ab_bpl_weight", 0.0) == 0.0
+    print("[PASS] test_stage_a1_a2_configs_invariants")
+
+
 def test_dual_loss_forward_backward():
     """Verify CrackBinaryLoss simultaneously calculates SoftBIoU and AB-BPL cleanly."""
     criterion = CrackBinaryLoss(
@@ -167,6 +192,7 @@ def test_decision_criteria_math():
 if __name__ == "__main__":
     test_stage_1a_configs_invariants()
     test_stage_1b_configs_invariants()
+    test_stage_a1_a2_configs_invariants()
     test_dual_loss_forward_backward()
     test_generate_combined_config()
     test_decision_criteria_math()

@@ -63,6 +63,10 @@ URL_U1_S2G_V1_WEIGHTS = (
     "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/diagnostics/"
     "phase6_u1_s2g/u1_s2g_weights.pth"
 )
+URL_A2_STAGE1 = (
+    "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/checkpoints/"
+    "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth"
+)
 
 # Ex-Ante Reference Baselines (Known Ground-Truth)
 BASE_CANDIDATE_B = {
@@ -185,6 +189,33 @@ RUN_CONFIG_MAP = {
     "a1_v1": {"type": "A1", "lambda": 0.250, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v1_l025_d2.yaml"},
     "a1_v2": {"type": "A1", "lambda": 0.750, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v2_l075_d2.yaml"},
     "a1_v3": {"type": "A1", "lambda": 0.500, "param_name": "d", "param_val": 3, "cfg": "configs/p3_ablation/phase6_combination/a1_v3_l050_d3.yaml"},
+    "a1_a2_v1": {
+        "type": "A1+A2",
+        "lambda": 0.250,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v1_l025_d2.yaml",
+        "stage1_url": URL_A2_STAGE1,
+        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
+    },
+    "a1_a2_v2": {
+        "type": "A1+A2",
+        "lambda": 0.500,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v2_l050_d2.yaml",
+        "stage1_url": URL_A2_STAGE1,
+        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
+    },
+    "a1_a2_v3": {
+        "type": "A1+A2",
+        "lambda": 0.750,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v3_l075_d2.yaml",
+        "stage1_url": URL_A2_STAGE1,
+        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
+    },
 }
 
 
@@ -209,6 +240,13 @@ def run_custom_runs(
         run_out_dir = os.path.join(args.output_dir, f"phase6_comb_{run_id}")
         completion_file = os.path.join(run_out_dir, "stage2_completion.json")
 
+        target_stage1 = stage1_ckpt
+        if item.get("stage1_url"):
+            a2_ckpt = os.path.join(args.checkpoint_dir, item["stage1_name"])
+            if not os.path.exists(a2_ckpt):
+                download_with_progress(item["stage1_url"], a2_ckpt)
+            target_stage1 = a2_ckpt
+
         if args.skip_completed and os.path.exists(completion_file):
             print(f"[{run_id}] Found existing stage2_completion.json. Skipping training.")
         else:
@@ -217,7 +255,7 @@ def run_custom_runs(
                 os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
                 "--config", cfg_path,
                 "--stage2-only",
-                "--checkpoint", stage1_ckpt,
+                "--checkpoint", target_stage1,
                 "--output-dir", run_out_dir,
                 "--data-root", args.data_root,
             ]
@@ -678,8 +716,8 @@ def main():
         "--runs",
         nargs="+",
         default=None,
-        choices=["b1_v1", "b1_v2", "b1_v3", "a1_v1", "a1_v2", "a1_v3"],
-        help="Specify specific run IDs to execute in parallel across multiple Colabs (e.g. --runs b1_v1 b1_v2)",
+        choices=["b1_v1", "b1_v2", "b1_v3", "a1_v1", "a1_v2", "a1_v3", "a1_a2_v1", "a1_a2_v2", "a1_a2_v3"],
+        help="Specify specific run IDs to execute in parallel across multiple Colabs (e.g. --runs a1_a2_v1 a1_a2_v2)",
     )
     parser.add_argument("--data_root", type=str, default="datasets/Crack500_ready", help="Path to Crack500 dataset")
     parser.add_argument("--output_dir", type=str, default="results/phase6_combination", help="Root directory for outputs")

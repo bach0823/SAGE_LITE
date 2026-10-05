@@ -57,7 +57,7 @@ def diagnose_stage2a():
     print("-" * 88)
     delta_b = comb_dice - cand_b["dice"]
     delta_s = comb_dice - best_standalone_dice
-    print(f"{'Stage 2A (A1* + B1*)':<24} | {comb_dice:<10.4f} | {comb_prec:<10.4f} | {comb_rec:<10.4f} | {comb_iou:<8.4f} | ΔBase: {delta_b:+.4f}")
+    print(f"{'Stage 2A (A1* + B1*)':<24} | {comb_dice:<10.4f} | {comb_prec:<10.4f} | {comb_rec:<10.4f} | {comb_iou:<8.4f} | dBase: {delta_b:+.4f}")
     print("=" * 88)
 
     print("\n[CRITERIA VERIFICATION]")
