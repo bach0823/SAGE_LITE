@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import shutil
 import subprocess
@@ -24,9 +24,42 @@ def prepare_crack500():
     zip_path = os.path.join(raw_dir, "crack_datasets.zip")
     
     if not os.path.exists(zip_path):
-        print("\n1. Downloading CRACK500 from author's Google Drive (~2GB)...")
+        print("\n1. Downloading CRACK500 dataset (~2GB)...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown"], check=True)
-        subprocess.run(f"gdown 13_vDYl54Mrd34dddX9w4ppAEiuWv4MlD -O {zip_path}", shell=True, check=True)
+        
+        # Candidate mirrors: (ID, Description)
+        candidate_mirrors = [
+            ("13_vDYl54Mrd34dddX9w4ppAEiuWv4MlD", "Author's Primary Google Drive"),
+            ("1CMr3Ou3uzJtAawlt8tKtfKJT9V2LjebO", "User Backup Google Drive Mirror"),
+        ]
+        
+        download_success = False
+        for drive_id, desc in candidate_mirrors:
+            print(f"\n   -> Trying {desc} (ID: {drive_id})...")
+            try:
+                cmd = f"gdown {drive_id} -O {zip_path}"
+                subprocess.run(cmd, shell=True, check=True)
+                # Verify that the downloaded file exists and is reasonably large (> 100MB)
+                if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100 * 1024 * 1024:
+                    print(f"   [OK] Downloaded successfully from {desc} ({os.path.getsize(zip_path)/(1024*1024):.1f} MB)")
+                    download_success = True
+                    break
+                else:
+                    size_mb = os.path.getsize(zip_path)/(1024*1024) if os.path.exists(zip_path) else 0
+                    print(f"   [WARN] Downloaded file invalid or too small ({size_mb:.2f} MB). Removing and falling back...")
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+            except Exception as e:
+                print(f"   [WARN] Failed to download from {desc}: {e}")
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+
+        if not download_success:
+            raise RuntimeError(
+                "\n[FAIL-FAST] All Google Drive mirrors failed or exceeded quota!\n"
+                "Please verify that backup mirrors have permission set to 'Anyone with the link',\n"
+                "or mount Google Drive and copy the dataset manually to /content/raw_data/crack_datasets.zip"
+            )
     else:
         print("\n1. ZIP file already exists. Skipping download.")
         
