@@ -63,10 +63,6 @@ URL_U1_S2G_V1_WEIGHTS = (
     "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/diagnostics/"
     "phase6_u1_s2g/u1_s2g_weights.pth"
 )
-URL_A2_STAGE1 = (
-    "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/checkpoints/"
-    "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth"
-)
 
 # Ex-Ante Reference Baselines (Known Ground-Truth)
 BASE_CANDIDATE_B = {
@@ -189,33 +185,6 @@ RUN_CONFIG_MAP = {
     "a1_v1": {"type": "A1", "lambda": 0.250, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v1_l025_d2.yaml"},
     "a1_v2": {"type": "A1", "lambda": 0.750, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v2_l075_d2.yaml"},
     "a1_v3": {"type": "A1", "lambda": 0.500, "param_name": "d", "param_val": 3, "cfg": "configs/p3_ablation/phase6_combination/a1_v3_l050_d3.yaml"},
-    "a1_a2_v1": {
-        "type": "A1+A2",
-        "lambda": 0.250,
-        "param_name": "d",
-        "param_val": 2,
-        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v1_l025_d2.yaml",
-        "stage1_url": URL_A2_STAGE1,
-        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
-    },
-    "a1_a2_v2": {
-        "type": "A1+A2",
-        "lambda": 0.500,
-        "param_name": "d",
-        "param_val": 2,
-        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v2_l050_d2.yaml",
-        "stage1_url": URL_A2_STAGE1,
-        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
-    },
-    "a1_a2_v3": {
-        "type": "A1+A2",
-        "lambda": 0.750,
-        "param_name": "d",
-        "param_val": 2,
-        "cfg": "configs/p3_ablation/phase6_combination/a1_a2_v3_l075_d2.yaml",
-        "stage1_url": URL_A2_STAGE1,
-        "stage1_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
-    },
 }
 
 
@@ -240,13 +209,6 @@ def run_custom_runs(
         run_out_dir = os.path.join(args.output_dir, f"phase6_comb_{run_id}")
         completion_file = os.path.join(run_out_dir, "stage2_completion.json")
 
-        target_stage1 = stage1_ckpt
-        if item.get("stage1_url"):
-            a2_ckpt = os.path.join(args.checkpoint_dir, item["stage1_name"])
-            if not os.path.exists(a2_ckpt):
-                download_with_progress(item["stage1_url"], a2_ckpt)
-            target_stage1 = a2_ckpt
-
         if args.skip_completed and os.path.exists(completion_file):
             print(f"[{run_id}] Found existing stage2_completion.json. Skipping training.")
         else:
@@ -255,7 +217,7 @@ def run_custom_runs(
                 os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
                 "--config", cfg_path,
                 "--stage2-only",
-                "--checkpoint", target_stage1,
+                "--checkpoint", stage1_ckpt,
                 "--output-dir", run_out_dir,
                 "--data-root", args.data_root,
             ]
@@ -676,7 +638,7 @@ def run_stage_3(
     print(f"Warm-Start Wts:   {v1_weights_path}")
     print("#" * 80)
 
-    s3_out_dir = os.path.join(args.output_dir, "final_candidate_c")
+    s3_out_dir = args.stage3_out_dir if getattr(args, "stage3_out_dir", None) else os.path.join(args.output_dir, "final_candidate_c")
     os.makedirs(s3_out_dir, exist_ok=True)
 
     cmd = [
@@ -716,8 +678,8 @@ def main():
         "--runs",
         nargs="+",
         default=None,
-        choices=["b1_v1", "b1_v2", "b1_v3", "a1_v1", "a1_v2", "a1_v3", "a1_a2_v1", "a1_a2_v2", "a1_a2_v3"],
-        help="Specify specific run IDs to execute in parallel across multiple Colabs (e.g. --runs a1_a2_v1 a1_a2_v2)",
+        choices=["b1_v1", "b1_v2", "b1_v3", "a1_v1", "a1_v2", "a1_v3"],
+        help="Specify specific run IDs to execute in parallel across multiple Colabs (e.g. --runs b1_v1 b1_v2)",
     )
     parser.add_argument("--data_root", type=str, default="datasets/Crack500_ready", help="Path to Crack500 dataset")
     parser.add_argument("--output_dir", type=str, default="results/phase6_combination", help="Root directory for outputs")
@@ -729,6 +691,9 @@ def main():
     parser.add_argument("--dilation_a1", type=int, default=None, help="Override SoftBIoU dilation kernel d for Stage 2 (default: 2)")
     parser.add_argument("--lambda_b1", type=float, default=None, help="Override AB-BPL lambda for Stage 2 (default: from sweep best or 0.04)")
     parser.add_argument("--dilation_b1", type=int, default=None, help="Override AB-BPL dilation radius r for Stage 2 (default: 2)")
+    parser.add_argument("--base_model", type=str, default=None, help="Explicit base model checkpoint path for Stage 3")
+    parser.add_argument("--base_config", type=str, default=None, help="Explicit base model config path for Stage 3")
+    parser.add_argument("--stage3_out_dir", type=str, default=None, help="Explicit output directory for Stage 3")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -801,7 +766,10 @@ def main():
         best_base_path, base_config_path, passed = run_stage_2(args, best_b1, best_a1, stage1_ckpt)
 
     if args.stage in ["stage3", "all"]:
-        if not os.path.exists(best_base_path):
+        if getattr(args, "base_model", None):
+            best_base_path = args.base_model
+            base_config_path = args.base_config if getattr(args, "base_config", None) else os.path.join(PROJECT_ROOT, "configs", "p3_ablation", "b2_p3_run_c_d4_k2_h64_phase5_sagelr2e4.yaml")
+        elif not os.path.exists(best_base_path):
             print(f"[Info] best_combined_base.pth not found at {best_base_path}. Using Candidate B global checkpoint.")
             cand_b_global = os.path.join(args.checkpoint_dir, "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth")
             if not os.path.exists(cand_b_global):
