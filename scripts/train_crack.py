@@ -814,6 +814,11 @@ def main(args):
 
         best_dice = 0.0
         best_loss = float('inf')
+        best_epoch = 0
+        best_precision = 0.0
+        best_recall = 0.0
+        best_iou = 0.0
+        best_crack_iou = 0.0
         epochs_no_improve = 0
         start_epoch = 0
 
@@ -962,6 +967,11 @@ def main(args):
             if is_best:
                 best_dice = val_dice
                 best_loss = val_loss
+                best_epoch = int(epoch)
+                best_precision = float(val_metrics.get('precision', 0.0))
+                best_recall = float(val_metrics.get('recall', 0.0))
+                best_iou = float(val_metrics.get('iou', 0.0))
+                best_crack_iou = float(val_metrics.get('crack_iou', 0.0))
                 epochs_no_improve = 0
                 
                 ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}.pth")
@@ -970,6 +980,10 @@ def main(args):
                     'model_state_dict': model.state_dict(),
                     'best_dice': float(best_dice),
                     'best_loss': float(best_loss),
+                    'precision': float(best_precision),
+                    'recall': float(best_recall),
+                    'iou': float(best_iou),
+                    'crack_iou': float(best_crack_iou),
                     'model_type': model_type,
                 }
                 if model_type in ['B1', 'B2']:
@@ -1014,6 +1028,19 @@ def main(args):
                 logger.info(f"EarlyStopping triggered at epoch {epoch} (Patience: {patience})")
                 break
                 
+        completion_file = os.path.join(output_dir, "training_completion.json")
+        with open(completion_file, 'w') as f:
+            json.dump({
+                'epochs_used': epoch - start_epoch,
+                'best_epoch': int(best_epoch),
+                'best_dice': float(best_dice),
+                'best_loss': float(best_loss),
+                'precision': float(best_precision),
+                'recall': float(best_recall),
+                'iou': float(best_iou),
+                'crack_iou': float(best_crack_iou),
+            }, f, indent=2)
+            
         logger.info(f"Training completed. Best Val Dice: {best_dice:.4f}")
         return
 
@@ -1196,6 +1223,11 @@ def main(args):
         if is_stage2_extension and stage == 2:
             best_stage_dice = global_best_dice
             best_stage_loss = global_best_loss
+            best_stage_epoch = int(resume_data.get('epoch', 0))
+            best_stage_precision = float(resume_data.get('precision', 0.0))
+            best_stage_recall = float(resume_data.get('recall', 0.0))
+            best_stage_iou = float(resume_data.get('iou', 0.0))
+            best_stage_crack_iou = float(resume_data.get('crack_iou', 0.0))
             if getattr(args, 'initial_epochs_no_improve', 0) > 0:
                 epochs_no_improve = int(args.initial_epochs_no_improve)
             else:
@@ -1207,6 +1239,11 @@ def main(args):
         else:
             best_stage_dice = 0.0
             best_stage_loss = float('inf')
+            best_stage_epoch = 0
+            best_stage_precision = 0.0
+            best_stage_recall = 0.0
+            best_stage_iou = 0.0
+            best_stage_crack_iou = 0.0
             epochs_no_improve = 0
             if getattr(args, 'initial_epochs_no_improve', 0) > 0:
                 epochs_no_improve = int(args.initial_epochs_no_improve)
@@ -1271,8 +1308,7 @@ def main(args):
                         )
                     else:
                         seg_loss = criterion(logits, labels, pred_tangent=pred_tangent, gt_tangent=gt_tangent)
-                    loss = seg_loss + 1.0 * lb_loss
-
+                    loss = seg_loss + lb_loss
                     
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -1355,6 +1391,11 @@ def main(args):
             if is_best_stage:
                 best_stage_dice = val_dice
                 best_stage_loss = val_loss
+                best_stage_epoch = int(epoch)
+                best_stage_precision = float(val_metrics.get('precision', 0.0))
+                best_stage_recall = float(val_metrics.get('recall', 0.0))
+                best_stage_iou = float(val_metrics.get('iou', 0.0))
+                best_stage_crack_iou = float(val_metrics.get('crack_iou', 0.0))
                 epochs_no_improve = 0
                 
                 ckpt_path = os.path.join(output_dir, f"best_model_{model_type.lower()}_stage{stage}.pth")
@@ -1364,6 +1405,10 @@ def main(args):
                     'model_state_dict': model.state_dict(),
                     'best_dice': float(best_stage_dice),
                     'best_loss': float(best_stage_loss),
+                    'precision': float(best_stage_precision),
+                    'recall': float(best_stage_recall),
+                    'iou': float(best_stage_iou),
+                    'crack_iou': float(best_stage_crack_iou),
                     'model_type': model_type,
                 }
                 if model_type in ['B1', 'B2']:
@@ -1392,6 +1437,10 @@ def main(args):
                         'model_state_dict': model.state_dict(),
                         'best_dice': float(global_best_dice),
                         'best_loss': float(global_best_loss),
+                        'precision': float(best_stage_precision),
+                        'recall': float(best_stage_recall),
+                        'iou': float(best_stage_iou),
+                        'crack_iou': float(best_stage_crack_iou),
                         'model_type': model_type,
                     }
                     if model_type in ['B1', 'B2']:
@@ -1441,7 +1490,16 @@ def main(args):
         
         completion_file = os.path.join(output_dir, f"stage{stage}_completion.json")
         with open(completion_file, 'w') as f:
-            json.dump({'epochs_used': actual_epochs_this_stage}, f)
+            json.dump({
+                'epochs_used': actual_epochs_this_stage,
+                'best_epoch': int(best_stage_epoch),
+                'best_dice': float(best_stage_dice),
+                'best_loss': float(best_stage_loss),
+                'precision': float(best_stage_precision),
+                'recall': float(best_stage_recall),
+                'iou': float(best_stage_iou),
+                'crack_iou': float(best_stage_crack_iou),
+            }, f, indent=2)
             
         logger.info(f"Stage {stage} finished. Total epochs used so far: {epochs_used_so_far}/{total_budget}")
 

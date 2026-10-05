@@ -1052,7 +1052,14 @@ def main():
     with open(summary_json_path, "w") as f:
         json.dump(full_report, f, indent=2)
 
+    candidate_c_path = os.path.join(args.out_dir, "final_candidate_c.pth")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "s2_gate_state": s2_gate.state_dict(),
+        "summary": s2g_summary,
+    }, candidate_c_path)
     print(f"\nFinal Summary Report saved to {summary_json_path}")
+    print(f"Candidate C Model saved to {candidate_c_path}")
     print("\n" + "=" * 80)
     print("EXPERIMENT U1-S2G-v2 RESULTS SUMMARY:")
     print(f"  Val Dice:          {s2g_summary['dice']:.4f} (Base: {base_summary['dice']:.4f}, v1: {u1_s2g_v1_summary['dice']:.4f})")
