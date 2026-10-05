@@ -517,22 +517,27 @@ def run_stage_2(
     best_a1: Dict[str, Any],
     stage1_ckpt: str,
 ) -> Tuple[str, str, bool]:
+    lam_a1 = args.lambda_a1 if getattr(args, "lambda_a1", None) is not None else best_a1["lambda"]
+    dil_a1 = args.dilation_a1 if getattr(args, "dilation_a1", None) is not None else best_a1.get("d", 2)
+    lam_b1 = args.lambda_b1 if getattr(args, "lambda_b1", None) is not None else best_b1["lambda"]
+    dil_b1 = args.dilation_b1 if getattr(args, "dilation_b1", None) is not None else best_b1.get("r", 2)
+
     print("\n" + "#" * 80)
     print("STAGE 2: COMBINATION EXPERIMENT (Run 2A: A1* + B1*)")
-    print(f"Optimal A1*: lambda={best_a1['lambda']}, d={best_a1.get('d', 2)} (Dice: {best_a1['dice']:.4f})")
-    print(f"Optimal B1*: lambda={best_b1['lambda']}, r={best_b1.get('r', 2)} (Dice: {best_b1['dice']:.4f})")
+    print(f"Optimal A1*: lambda={lam_a1}, d={dil_a1} (Base reference: {best_a1.get('run_id', 'a1_v0')})")
+    print(f"Optimal B1*: lambda={lam_b1}, r={dil_b1} (Base reference: {best_b1.get('run_id', 'b1_v0')})")
     print("#" * 80)
 
-    best_standalone_dice = max(best_a1["dice"], best_b1["dice"])
+    best_standalone_dice = max(best_a1.get("dice", 0.7685), best_b1.get("dice", 0.7685))
     print(f"Baseline to beat (Best Standalone Dice): {best_standalone_dice:.4f}")
 
     run_dir = os.path.join(args.output_dir, "phase6_comb_stage2a_a1_b1")
     cfg_path = os.path.join(args.output_dir, "configs", "comb_a1_b1.yaml")
     generate_combined_config(
-        lambda_b1=best_b1["lambda"],
-        r_b1=best_b1.get("r", 2),
-        lambda_a1=best_a1["lambda"],
-        d_a1=best_a1.get("d", 2),
+        lambda_b1=lam_b1,
+        r_b1=dil_b1,
+        lambda_a1=lam_a1,
+        d_a1=dil_a1,
         output_cfg_path=cfg_path,
         output_run_dir=run_dir,
         data_root=args.data_root,
@@ -677,6 +682,10 @@ def main():
     parser.add_argument("--candidate_b_stage1", type=str, default=None, help="Explicit path to Candidate B stage 1 checkpoint")
     parser.add_argument("--s2g_v1_weights", type=str, default=None, help="Explicit path to U1-S2G v1 weights")
     parser.add_argument("--skip_completed", action="store_true", help="Skip runs that have already produced stage2_completion.json")
+    parser.add_argument("--lambda_a1", type=float, default=None, help="Override SoftBIoU lambda for Stage 2 (default: from sweep best or 0.50)")
+    parser.add_argument("--dilation_a1", type=int, default=None, help="Override SoftBIoU dilation kernel d for Stage 2 (default: 2)")
+    parser.add_argument("--lambda_b1", type=float, default=None, help="Override AB-BPL lambda for Stage 2 (default: from sweep best or 0.04)")
+    parser.add_argument("--dilation_b1", type=int, default=None, help="Override AB-BPL dilation radius r for Stage 2 (default: 2)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
