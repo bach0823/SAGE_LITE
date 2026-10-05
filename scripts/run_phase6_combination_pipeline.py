@@ -685,6 +685,23 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Device] Using device: {device}")
 
+    # Auto-detect Crack500 location if not present at requested data_root
+    if not os.path.exists(os.path.join(args.data_root, "val", "images")):
+        candidates = [
+            "/content/dataset/Crack500",
+            "/content/Crack500",
+            "/content/Crack500_ready",
+            os.path.join(PROJECT_ROOT, "datasets", "Crack500_ready"),
+            os.path.join(PROJECT_ROOT, "datasets", "Crack500"),
+            os.path.join(PROJECT_ROOT, "..", "datasets", "Crack500_ready"),
+            os.path.join(PROJECT_ROOT, "..", "dataset", "Crack500"),
+        ]
+        for c in candidates:
+            if os.path.exists(os.path.join(c, "val", "images")):
+                print(f"[Auto-detect Data Root] Switched data_root: {args.data_root} -> {c}")
+                args.data_root = c
+                break
+
     # Ensure Candidate B Stage 1 Checkpoint exists
     stage1_ckpt = args.candidate_b_stage1
     if not stage1_ckpt:
