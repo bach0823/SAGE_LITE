@@ -178,6 +178,102 @@ def evaluate_thin_crack_for_checkpoint(
     return mean_thin
 
 
+RUN_CONFIG_MAP = {
+    "b1_v1": {"type": "B1", "lambda": 0.020, "param_name": "r", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/b1_v1_l002_r2.yaml"},
+    "b1_v2": {"type": "B1", "lambda": 0.080, "param_name": "r", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/b1_v2_l008_r2.yaml"},
+    "b1_v3": {"type": "B1", "lambda": 0.040, "param_name": "r", "param_val": 1, "cfg": "configs/p3_ablation/phase6_combination/b1_v3_l004_r1.yaml"},
+    "a1_v1": {"type": "A1", "lambda": 0.250, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v1_l025_d2.yaml"},
+    "a1_v2": {"type": "A1", "lambda": 0.750, "param_name": "d", "param_val": 2, "cfg": "configs/p3_ablation/phase6_combination/a1_v2_l075_d2.yaml"},
+    "a1_v3": {"type": "A1", "lambda": 0.500, "param_name": "d", "param_val": 3, "cfg": "configs/p3_ablation/phase6_combination/a1_v3_l050_d3.yaml"},
+}
+
+
+def run_custom_runs(
+    args: argparse.Namespace,
+    run_ids: List[str],
+    stage1_ckpt: str,
+    device: torch.device,
+) -> List[Dict[str, Any]]:
+    """Runs a specific subset of Stage 1 runs (ideal for multi-Colab parallel execution)."""
+    print("\n" + "#" * 80)
+    print(f"RUNNING CUSTOM PARALLEL RUNS: {run_ids}")
+    print("#" * 80)
+
+    results = []
+    for run_id in run_ids:
+        if run_id not in RUN_CONFIG_MAP:
+            raise ValueError(f"Unknown run ID: {run_id}. Valid choices: {list(RUN_CONFIG_MAP.keys())}")
+
+        item = RUN_CONFIG_MAP[run_id]
+        cfg_path = os.path.join(PROJECT_ROOT, item["cfg"])
+        run_out_dir = os.path.join(args.output_dir, f"phase6_comb_{run_id}")
+        completion_file = os.path.join(run_out_dir, "stage2_completion.json")
+
+        if args.skip_completed and os.path.exists(completion_file):
+            print(f"[{run_id}] Found existing stage2_completion.json. Skipping training.")
+        else:
+            cmd = [
+                sys.executable,
+                os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
+                "--config", cfg_path,
+                "--stage2-only",
+                "--checkpoint", stage1_ckpt,
+                "--output-dir", run_out_dir,
+                "--data-root", args.data_root,
+            ]
+            run_command(cmd, f"Executing Run {run_id} ({item['type']}, lambda={item['lambda']}, {item['param_name']}={item['param_val']})")
+
+        with open(completion_file, "r") as f:
+            stats = json.load(f)
+
+        dice = stats.get("best_dice", stats.get("dice", 0.0))
+        prec = stats.get("precision", 0.0)
+        rec = stats.get("recall", 0.0)
+        best_model_path = os.path.join(run_out_dir, "best_model_b2_stage2.pth")
+
+        entry = {
+            "run_id": run_id,
+            "type": item["type"],
+            "lambda": item["lambda"],
+            item["param_name"]: item["param_val"],
+            "dice": dice,
+            "precision": prec,
+            "recall": rec,
+            "best_epoch": stats.get("best_epoch", 0),
+            "output_dir": run_out_dir,
+            "best_model": best_model_path,
+        }
+
+        if item["type"] == "B1":
+            score = dice * rec
+            c_pass = rec >= 0.840
+            entry["score"] = score
+            entry["constraint_pass"] = c_pass
+        else:
+            thin_dice = evaluate_thin_crack_for_checkpoint(best_model_path, cfg_path, args.data_root, device)
+            score = dice + 2.0 * (thin_dice - 0.4230)
+            entry["thin_dice"] = thin_dice
+            entry["score"] = score
+
+        results.append(entry)
+
+    print("\n" + "=" * 80)
+    print("PARALLEL RUNS SUMMARY TABLE:")
+    print("-" * 80)
+    for r in results:
+        if r["type"] == "B1":
+            print(f"  [{r['run_id']}] Dice: {r['dice']:.4f} | Prec: {r['precision']:.4f} | Recall: {r['recall']:.4f} | Score (Dice*Rec): {r['score']:.4f} | Constraint (Rec>=0.840): {'PASS' if r['constraint_pass'] else 'FAIL'}")
+        else:
+            print(f"  [{r['run_id']}] Dice: {r['dice']:.4f} | Prec: {r['precision']:.4f} | Recall: {r['recall']:.4f} | ThinDice: {r.get('thin_dice', 0):.4f} | Objective Score: {r['score']:.4f}")
+    print("=" * 80 + "\n")
+
+    summary_file = os.path.join(args.output_dir, f"summary_{'_'.join(run_ids)}.json")
+    with open(summary_file, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Summary saved to {summary_file}")
+    return results
+
+
 # =============================================================================
 # STAGE 1A: B1 LAMBDA SWEEP
 # =============================================================================
@@ -568,6 +664,13 @@ def main():
         choices=["1a", "1b", "stage1", "stage2", "stage3", "all"],
         help="Pipeline stage to execute (default: all)",
     )
+    parser.add_argument(
+        "--runs",
+        nargs="+",
+        default=None,
+        choices=["b1_v1", "b1_v2", "b1_v3", "a1_v1", "a1_v2", "a1_v3"],
+        help="Specify specific run IDs to execute in parallel across multiple Colabs (e.g. --runs b1_v1 b1_v2)",
+    )
     parser.add_argument("--data_root", type=str, default="datasets/Crack500_ready", help="Path to Crack500 dataset")
     parser.add_argument("--output_dir", type=str, default="results/phase6_combination", help="Root directory for outputs")
     parser.add_argument("--checkpoint_dir", type=str, default="results/checkpoints", help="Directory containing base checkpoints")
@@ -595,6 +698,11 @@ def main():
         v1_weights = os.path.join(PROJECT_ROOT, "results", "diagnostics", "phase6_u1_s2g", "u1_s2g_weights.pth")
     if not os.path.exists(v1_weights):
         download_with_progress(URL_U1_S2G_V1_WEIGHTS, v1_weights)
+
+    # Multi-Colab parallel run mode: if --runs provided, execute those and exit
+    if args.runs:
+        run_custom_runs(args, args.runs, stage1_ckpt, device)
+        return
 
     best_b1 = REF_B1_V0
     best_a1 = REF_A1_V0
