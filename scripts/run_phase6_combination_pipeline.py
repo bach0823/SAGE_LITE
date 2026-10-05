@@ -609,6 +609,11 @@ def run_stage_2(
         else:
             # If standalone was reference run v0, use global Candidate B checkpoint
             cand_b_global = os.path.join(args.checkpoint_dir, "P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth")
+            if not os.path.exists(cand_b_global):
+                download_with_progress(
+                    "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth",
+                    cand_b_global
+                )
             import shutil
             shutil.copyfile(cand_b_global, best_combined_base)
             print(f"[Fallback Base] Using Candidate B global checkpoint as base.")
