@@ -246,6 +246,14 @@ RUN_CONFIG_MAP = {
         "cfg": "configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml",
         "is_full_s1": True,
     },
+    "a1_s2g_stage2": {
+        "type": "A1+S2Gate_Stage2Only",
+        "lambda": 0.500,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml",
+        "ckpt_path": "results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_stage1.pth",
+    },
 }
 
 
@@ -272,7 +280,9 @@ def run_custom_runs(
         is_full = item.get("is_full_s1", False)
 
         target_ckpt = stage1_ckpt
-        if item.get("ckpt_name") and item.get("ckpt_url"):
+        if item.get("ckpt_path"):
+            target_ckpt = os.path.join(PROJECT_ROOT, item["ckpt_path"]) if not os.path.isabs(item["ckpt_path"]) else item["ckpt_path"]
+        elif item.get("ckpt_name") and item.get("ckpt_url"):
             target_ckpt = os.path.join(args.checkpoint_dir, item["ckpt_name"])
             if not os.path.exists(target_ckpt):
                 download_with_progress(item["ckpt_url"], target_ckpt)
