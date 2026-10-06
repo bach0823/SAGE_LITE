@@ -1,0 +1,60 @@
+model: B2
+num_transformer_layers: 4
+p3_mode: "C"
+seed: 42
+img_size: 448
+batch_size: 14
+num_workers: 2
+epochs: 35
+stage1_epochs: 17
+warmup_epochs: 3
+patience: 8
+two_stage: true
+lr: 1e-4
+sage_lr: 2e-4
+p3_lr: 1e-4
+gamma_init: 0.01
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
+stage2_p3_lr: 1e-4
+stage2_sage_lr: 1e-4
+output_dir: "results/phase6_combination/phase6_a1_a2_v1_full_s1"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+# Head architecture: PLU-Head (Progressive Learned Upsampling)
+use_plu_head: true
+
+# Boundary Objective: SoftBIoU lambda=0.25, d=2
+boundary_iou_weight: 0.25
+boundary_iou_dilation: 2
+
+# Control flags
+ab_bpl_weight: 0.0
+cldice_weight: 0.0
+
+sage_config:
+  top_k: 2
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+  fusion_type: "residual"
+  residual_scale: 0.1
+
+root_dir: "datasets/Crack500_ready"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"

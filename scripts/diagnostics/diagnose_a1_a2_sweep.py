@@ -17,12 +17,22 @@ def diagnose_a1_a2():
     results_dir = os.path.join(PROJECT_ROOT, args.results_dir) if not os.path.isabs(args.results_dir) else args.results_dir
 
     if args.run_id:
-        target_dirs = [os.path.join(results_dir, f"phase6_comb_{args.run_id}")]
+        target_dirs = [os.path.join(results_dir, f"phase6_comb_{args.run_id}"), os.path.join(results_dir, f"phase6_{args.run_id}")]
+        target_dirs = [d for d in target_dirs if os.path.exists(d)]
     else:
-        target_dirs = sorted(glob.glob(os.path.join(results_dir, "phase6_comb_a1_a2_*")))
+        patterns = [
+            os.path.join(results_dir, "phase6_comb_a1_a2_*"),
+            os.path.join(results_dir, "phase6_comb_a1_full_*"),
+            os.path.join(results_dir, "phase6_a1_full_*"),
+            os.path.join(results_dir, "phase6_a1_a2_*"),
+        ]
+        target_dirs = []
+        for p in patterns:
+            target_dirs.extend(glob.glob(p))
+        target_dirs = sorted(list(set(target_dirs)))
 
     if not target_dirs:
-        print(f"[NOTE] No A1+A2 run directories found matching pattern in {results_dir}")
+        print(f"[NOTE] No matching run directories found in {results_dir}")
         return
 
     # Reference Baselines

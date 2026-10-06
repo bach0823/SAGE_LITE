@@ -212,21 +212,29 @@ RUN_CONFIG_MAP = {
         "ckpt_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
         "ckpt_url": "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/checkpoints/P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
     },
-    "full35_a1_b1": {
-        "type": "Full35_A1+B1",
+    "a1_full_s1_l050": {
+        "type": "A1_Full_S1",
         "lambda": 0.500,
-        "param_name": "ab_bpl",
-        "param_val": 0.040,
-        "cfg": "configs/p3_ablation/phase6_full_combinations/comb_a1_b1_full35.yaml",
-        "from_stage1": True,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_full_s1/a1_full_s1_l050_d2.yaml",
+        "is_full_s1": True,
     },
-    "full35_a1_a2": {
-        "type": "Full35_A1+A2",
+    "a1_full_s1_l075": {
+        "type": "A1_Full_S1",
+        "lambda": 0.750,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_full_s1/a1_full_s1_l075_d2.yaml",
+        "is_full_s1": True,
+    },
+    "a1_a2_v1_full_s1": {
+        "type": "A1+A2_Full_S1",
         "lambda": 0.250,
-        "param_name": "plu_head",
-        "param_val": True,
-        "cfg": "configs/p3_ablation/phase6_full_combinations/comb_a1_a2_full35.yaml",
-        "from_stage1": True,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_full_s1/a1_a2_v1_full_s1.yaml",
+        "is_full_s1": True,
     },
 }
 
@@ -251,6 +259,7 @@ def run_custom_runs(
         cfg_path = os.path.join(PROJECT_ROOT, item["cfg"])
         run_out_dir = os.path.join(args.output_dir, f"phase6_comb_{run_id}")
         completion_file = os.path.join(run_out_dir, "stage2_completion.json")
+        is_full = item.get("is_full_s1", False)
 
         target_ckpt = stage1_ckpt
         if item.get("ckpt_name") and item.get("ckpt_url"):
@@ -261,33 +270,35 @@ def run_custom_runs(
         if args.skip_completed and os.path.exists(completion_file):
             print(f"[{run_id}] Found existing stage2_completion.json. Skipping training.")
         else:
-            if item.get("from_stage1", False):
-                cmd = [
-                    sys.executable,
-                    os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
-                    "--config", cfg_path,
-                    "--output-dir", run_out_dir,
-                    "--data-root", args.data_root,
-                ]
-            else:
-                cmd = [
-                    sys.executable,
-                    os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
-                    "--config", cfg_path,
-                    "--stage2-only",
-                    "--checkpoint", target_ckpt,
-                    "--output-dir", run_out_dir,
-                    "--data-root", args.data_root,
-                ]
-            run_command(cmd, f"Executing Run {run_id} ({item['type']}, lambda={item['lambda']}, {item['param_name']}={item['param_val']})")
+            cmd = [
+                sys.executable,
+                os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
+                "--config", cfg_path,
+                "--output-dir", run_out_dir,
+                "--data-root", args.data_root,
+            ]
+            if not is_full:
+                cmd.extend(["--stage2-only", "--checkpoint", target_ckpt])
 
-        with open(completion_file, "r") as f:
-            stats = json.load(f)
+            run_command(cmd, f"Executing Run {run_id} ({item['type']}, lambda={item['lambda']}, {item['param_name']}={item['param_val']}, Full S1={is_full})")
+
+        stats = {}
+        if os.path.exists(completion_file):
+            with open(completion_file, "r") as f:
+                stats = json.load(f)
+        else:
+            # Fallback for full 2-stage runs if stage2_completion isn't written directly
+            summary_path = os.path.join(run_out_dir, "training_summary.json")
+            if os.path.exists(summary_path):
+                with open(summary_path, "r") as f:
+                    stats = json.load(f)
 
         dice = stats.get("best_dice", stats.get("dice", 0.0))
         prec = stats.get("precision", 0.0)
         rec = stats.get("recall", 0.0)
         best_model_path = os.path.join(run_out_dir, "best_model_b2_stage2.pth")
+        if not os.path.exists(best_model_path):
+            best_model_path = os.path.join(run_out_dir, "best_model_b2_global.pth")
 
         entry = {
             "run_id": run_id,
