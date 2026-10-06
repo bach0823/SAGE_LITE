@@ -212,6 +212,22 @@ RUN_CONFIG_MAP = {
         "ckpt_name": "P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
         "ckpt_url": "https://raw.githubusercontent.com/bach0823/chuyendettnt/main/results/checkpoints/P3_C_Phase6_A2_Pure_PLU_D4_K2_H64_best_model_b2_stage1.pth",
     },
+    "full35_a1_b1": {
+        "type": "Full35_A1+B1",
+        "lambda": 0.500,
+        "param_name": "ab_bpl",
+        "param_val": 0.040,
+        "cfg": "configs/p3_ablation/phase6_full_combinations/comb_a1_b1_full35.yaml",
+        "from_stage1": True,
+    },
+    "full35_a1_a2": {
+        "type": "Full35_A1+A2",
+        "lambda": 0.250,
+        "param_name": "plu_head",
+        "param_val": True,
+        "cfg": "configs/p3_ablation/phase6_full_combinations/comb_a1_a2_full35.yaml",
+        "from_stage1": True,
+    },
 }
 
 
@@ -245,15 +261,24 @@ def run_custom_runs(
         if args.skip_completed and os.path.exists(completion_file):
             print(f"[{run_id}] Found existing stage2_completion.json. Skipping training.")
         else:
-            cmd = [
-                sys.executable,
-                os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
-                "--config", cfg_path,
-                "--stage2-only",
-                "--checkpoint", target_ckpt,
-                "--output-dir", run_out_dir,
-                "--data-root", args.data_root,
-            ]
+            if item.get("from_stage1", False):
+                cmd = [
+                    sys.executable,
+                    os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
+                    "--config", cfg_path,
+                    "--output-dir", run_out_dir,
+                    "--data-root", args.data_root,
+                ]
+            else:
+                cmd = [
+                    sys.executable,
+                    os.path.join(PROJECT_ROOT, "scripts", "train_crack.py"),
+                    "--config", cfg_path,
+                    "--stage2-only",
+                    "--checkpoint", target_ckpt,
+                    "--output-dir", run_out_dir,
+                    "--data-root", args.data_root,
+                ]
             run_command(cmd, f"Executing Run {run_id} ({item['type']}, lambda={item['lambda']}, {item['param_name']}={item['param_val']})")
 
         with open(completion_file, "r") as f:
