@@ -439,6 +439,8 @@ def main():
         point_rend_mid_channels=point_rend_mid_channels,
         point_rend_train_points=point_rend_train_points,
         point_rend_subdivision_points=point_rend_subdivision_points,
+        use_s2_gate=model_cfg.get("use_s2_gate", False),
+        s2_gate_kernel_size=int(model_cfg.get("s2_gate_kernel_size", 3)),
     ).to(device)
 
     if use_plu_head:

@@ -289,8 +289,12 @@ def load_model_from_checkpoint(
     point_rend_train_points = int(config.get("point_rend_train_points", 2048))
     point_rend_subdivision_points = int(config.get("point_rend_subdivision_points", 8192))
 
+    use_s2_gate = config.get("use_s2_gate", False)
+    s2_gate_kernel_size = int(config.get("s2_gate_kernel_size", 3))
+
     logger.info(f"Instantiating B2 UNet: Depth={vit_depth}, BS={config.get('batch_size', 14)}, "
-                f"p3_mode='{p3_mode}', img_size={img_size}, use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}")
+                f"p3_mode='{p3_mode}', img_size={img_size}, use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, "
+                f"use_point_rend={use_point_rend}, use_s2_gate={use_s2_gate} (k={s2_gate_kernel_size})")
 
     model = create_b2_unet(
         num_classes=1,
@@ -306,6 +310,8 @@ def load_model_from_checkpoint(
         point_rend_mid_channels=point_rend_mid_channels,
         point_rend_train_points=point_rend_train_points,
         point_rend_subdivision_points=point_rend_subdivision_points,
+        use_s2_gate=use_s2_gate,
+        s2_gate_kernel_size=s2_gate_kernel_size,
     ).to(device)
 
     if use_plu_head:
