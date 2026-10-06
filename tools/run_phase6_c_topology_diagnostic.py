@@ -207,6 +207,10 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
     point_rend_subdivision_points = int(cfg.get("point_rend_subdivision_points", 8192))
     use_oriented_strip_pooling = cfg.get("use_oriented_strip_pooling", False)
     use_tangent_head = cfg.get("use_tangent_head", False) or (float(cfg.get("tangent_weight", 0.0)) > 0.0)
+    use_s2_gate = cfg.get("use_s2_gate", False)
+    s2_gate_kernel_size = int(cfg.get("s2_gate_kernel_size", 3))
+    use_s2_gate_block2 = cfg.get("use_s2_gate_block2", False)
+    s2_gate_block2_kernel_size = int(cfg.get("s2_gate_block2_kernel_size", 3))
 
     model = create_b2_unet(
         num_transformer_layers=num_layers,
@@ -222,6 +226,10 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         point_rend_subdivision_points=point_rend_subdivision_points,
         use_oriented_strip_pooling=use_oriented_strip_pooling,
         use_tangent_head=use_tangent_head,
+        use_s2_gate=use_s2_gate,
+        s2_gate_kernel_size=s2_gate_kernel_size,
+        use_s2_gate_block2=use_s2_gate_block2,
+        s2_gate_block2_kernel_size=s2_gate_block2_kernel_size,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)

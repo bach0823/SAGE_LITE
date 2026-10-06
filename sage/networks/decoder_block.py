@@ -246,6 +246,8 @@ class UNetDecoder(nn.Module):
         use_tangent_head: bool = False,
         use_s2_gate: bool = False,
         s2_gate_kernel_size: int = 3,
+        use_s2_gate_block2: bool = False,
+        s2_gate_block2_kernel_size: int = 3,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -262,6 +264,8 @@ class UNetDecoder(nn.Module):
         self.use_tangent_head = use_tangent_head
         self.use_s2_gate = use_s2_gate
         self.s2_gate_kernel_size = s2_gate_kernel_size
+        self.use_s2_gate_block2 = use_s2_gate_block2
+        self.s2_gate_block2_kernel_size = s2_gate_block2_kernel_size
 
         if self.use_s2_gate:
             self.s2_gate = S2GateModule(
@@ -271,6 +275,15 @@ class UNetDecoder(nn.Module):
             )
         else:
             self.s2_gate = None
+
+        if self.use_s2_gate_block2:
+            self.s2_gate_block2 = S2GateModule(
+                s2_channels=96,
+                skip_channels=48,
+                kernel_size=s2_gate_block2_kernel_size,
+            )
+        else:
+            self.s2_gate_block2 = None
 
         # Reversed channels: [384, 192, 96, 48]
         reversed_channels = list(reversed(encoder_channels))
@@ -378,12 +391,16 @@ class UNetDecoder(nn.Module):
 
         x_dec = bottleneck
         last_gate_alpha = None
+        last_gate_alpha_block2 = None
 
         for i, block in enumerate(self.decoder_blocks):
             skip = reversed_skips[i]
             # U1-S2G: Gate skip S1 (56x56) using S2 context x_dec (28x28) prior to Block 1
             if i == 1 and self.s2_gate is not None:
                 skip, last_gate_alpha = self.s2_gate(x_dec, skip)
+            # Phase 7: Gate skip S0 (112x112) using S1 context x_dec (56x56) prior to Block 2
+            elif i == 2 and self.s2_gate_block2 is not None:
+                skip, last_gate_alpha_block2 = self.s2_gate_block2(x_dec, skip)
             x_dec = block(x_dec, skip)
             # Experiment A: Oriented Strip Pooling at Block 1 (56x56 resolution)
             if i == 1 and self.strip_pool_56 is not None:
@@ -391,6 +408,7 @@ class UNetDecoder(nn.Module):
 
         # Cache gate alpha for diagnostics and audit
         self.last_gate_alpha = last_gate_alpha
+        self.last_gate_alpha_block2 = last_gate_alpha_block2
 
         # Experiment B: Tangent Field prediction from final decoder features (112x112)
         pred_tangent = None
