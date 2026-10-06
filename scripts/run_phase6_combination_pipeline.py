@@ -143,6 +143,8 @@ def evaluate_thin_crack_for_checkpoint(
         sage_config=config.get("sage_config", {}),
         p3_mode=config.get("p3_mode", "C"),
         use_plu_head=config.get("use_plu_head", False),
+        use_s2_gate=config.get("use_s2_gate", False),
+        s2_gate_kernel_size=int(config.get("s2_gate_kernel_size", 3)),
     )
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
