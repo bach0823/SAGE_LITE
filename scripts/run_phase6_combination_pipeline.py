@@ -236,6 +236,14 @@ RUN_CONFIG_MAP = {
         "cfg": "configs/p3_ablation/phase6_full_s1/a1_a2_v1_full_s1.yaml",
         "is_full_s1": True,
     },
+    "a1_s2g_end_to_end": {
+        "type": "A1+S2Gate_EndToEnd",
+        "lambda": 0.500,
+        "param_name": "d",
+        "param_val": 2,
+        "cfg": "configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml",
+        "is_full_s1": True,
+    },
 }
 
 

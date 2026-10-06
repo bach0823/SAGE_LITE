@@ -1,0 +1,68 @@
+model: B2
+num_transformer_layers: 4
+p3_mode: "C"
+seed: 42
+img_size: 448
+batch_size: 14
+num_workers: 2
+epochs: 35
+stage1_epochs: 17
+warmup_epochs: 3
+patience: 8
+two_stage: true
+
+# Stage 1 Learning Rates: S2-Gate có LR riêng (1e-3)
+lr: 1e-4
+sage_lr: 2e-4
+p3_lr: 1e-4
+s2_gate_lr: 1e-3
+
+# Stage 2 Learning Rates: S2-Gate dùng chung base LR (1e-4)
+stage2_base_lr: 1e-4
+stage2_shared_lr: 1e-4
+stage2_p3_lr: 1e-4
+stage2_sage_lr: 1e-4
+gamma_init: 0.01
+
+output_dir: "results/phase6_combination/phase6_a1_s2g_end_to_end"
+mask_suffix: ""
+smart_filter: true
+crop_mode: "random"
+
+# Architecture: Bilinear Head + Native S2-Gate v2 (Conv3x3) tích hợp ngay từ đầu
+use_plu_head: false
+use_s2_gate: true
+s2_gate_kernel_size: 3
+
+# Objective Component: SoftBIoU (lambda=0.50, d=2)
+boundary_iou_weight: 0.50
+boundary_iou_dilation: 2
+
+# Control flags
+ab_bpl_weight: 0.0
+cldice_weight: 0.0
+
+sage_config:
+  top_k: 2
+  gating_type: "sigmoid"
+  shared_expert_indices: [0, 1, 2, 3]
+  router_hidden_dim: 64
+  load_balance_factor: 0.01
+  logit_modulation: true
+  expert_dropout: 0.1
+  fusion_type: "residual"
+  residual_scale: 0.1
+
+root_dir: "datasets/Crack500_ready"
+
+train:
+  images: "train/images"
+  masks: "train/masks"
+
+val:
+  images: "val/images"
+  masks: "val/masks"
+
+test:
+  images: "test/images"
+  masks: "test/masks"

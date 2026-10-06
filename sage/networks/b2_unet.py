@@ -90,6 +90,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         use_oriented_strip_pooling: bool = False,
         use_tangent_head: bool = False,
         use_s2_gate: bool = False,
+        s2_gate_kernel_size: int = 3,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -106,6 +107,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.use_oriented_strip_pooling = use_oriented_strip_pooling
         self.use_tangent_head = use_tangent_head
         self.use_s2_gate = use_s2_gate
+        self.s2_gate_kernel_size = s2_gate_kernel_size
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -138,6 +140,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             use_oriented_strip_pooling=use_oriented_strip_pooling,
             use_tangent_head=use_tangent_head,
             use_s2_gate=use_s2_gate,
+            s2_gate_kernel_size=s2_gate_kernel_size,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -476,6 +479,7 @@ def create_b2_unet(
     use_oriented_strip_pooling: bool = False,
     use_tangent_head: bool = False,
     use_s2_gate: bool = False,
+    s2_gate_kernel_size: int = 3,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -500,5 +504,6 @@ def create_b2_unet(
         use_oriented_strip_pooling=use_oriented_strip_pooling,
         use_tangent_head=use_tangent_head,
         use_s2_gate=use_s2_gate,
+        s2_gate_kernel_size=s2_gate_kernel_size,
     )
 

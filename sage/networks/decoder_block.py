@@ -245,6 +245,7 @@ class UNetDecoder(nn.Module):
         use_oriented_strip_pooling: bool = False,
         use_tangent_head: bool = False,
         use_s2_gate: bool = False,
+        s2_gate_kernel_size: int = 3,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -260,9 +261,14 @@ class UNetDecoder(nn.Module):
         self.use_oriented_strip_pooling = use_oriented_strip_pooling
         self.use_tangent_head = use_tangent_head
         self.use_s2_gate = use_s2_gate
+        self.s2_gate_kernel_size = s2_gate_kernel_size
 
         if self.use_s2_gate:
-            self.s2_gate = S2GateModule(s2_channels=192, skip_channels=96)
+            self.s2_gate = S2GateModule(
+                s2_channels=192,
+                skip_channels=96,
+                kernel_size=s2_gate_kernel_size,
+            )
         else:
             self.s2_gate = None
 

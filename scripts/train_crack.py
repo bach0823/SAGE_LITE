@@ -163,19 +163,22 @@ def create_stage2_optimizer(
 
     return optim.AdamW(param_groups)
 
-def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=None, weight_decay=0.05):
+def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=None, lr_s2_gate=None, weight_decay=0.05):
     """
     Construct optimizer parameter groups categorized by learning rate tiers and weight decay:
     - Backbone (pretrained ConvNeXt stages and ViT blocks): lr_backbone (1e-5)
     - Decoder & Interface (UNet decoder and newly initialized hybrid bridge layers): lr_decoder (1e-4)
     - SAGE components (routers, SA-Hub adapters, adaptive fusion alpha): lr_sage (1e-4)
     - P3 refinement (ASDW / Generic DW): lr_p3 (1e-4)
+    - S2-Gate (Spatial Modulation Gate): lr_s2_gate (default: 1e-3 if present or lr_decoder)
     - Weight decay: 0.0 for LayerNorm/Norm, biases, and gamma; weight_decay (0.05) for weights.
     """
     if lr_sage is None:
         lr_sage = lr_decoder
     if lr_p3 is None:
         lr_p3 = lr_decoder
+    if lr_s2_gate is None:
+        lr_s2_gate = lr_decoder
 
     # Interface / bridge layers between ConvNeXt and ViT are newly initialized (NOT pretrained)
     interface_keys = (
@@ -194,6 +197,8 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=Non
         'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_sage, 'name': 'sage'},
         'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_p3, 'name': 'p3_refinement'},
         'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_p3, 'name': 'p3_refinement'},
+        's2_gate_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_s2_gate, 'name': 's2_gate'},
+        's2_gate_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_s2_gate, 'name': 's2_gate'},
     }
 
     for name, param in model.named_parameters():
@@ -204,6 +209,8 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=Non
         
         if 'p3_refinement' in name:
             tier = 'p3'
+        elif 's2_gate' in name:
+            tier = 's2_gate'
         elif 'router' in name or 'sa_hub' in name or 'alpha' in name:
             tier = 'sage'
         elif name.startswith('decoder') or any(k in name for k in interface_keys):
@@ -678,6 +685,8 @@ def main(args):
         use_plu_head = config.get('use_plu_head', False)
         use_oriented_strip_pooling = config.get('use_oriented_strip_pooling', False)
         use_tangent_head = config.get('use_tangent_head', False) or (float(config.get('tangent_weight', 0.0)) > 0.0)
+        use_s2_gate = config.get('use_s2_gate', False)
+        s2_gate_kernel_size = int(config.get('s2_gate_kernel_size', 3))
         model = create_b2_unet(
             num_classes=1,
             img_size=img_size,
@@ -694,8 +703,10 @@ def main(args):
             point_rend_subdivision_points=point_rend_subdivision_points,
             use_oriented_strip_pooling=use_oriented_strip_pooling,
             use_tangent_head=use_tangent_head,
+            use_s2_gate=use_s2_gate,
+            s2_gate_kernel_size=s2_gate_kernel_size,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}, strip_pool={use_oriented_strip_pooling}, tangent_head={use_tangent_head}")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}, strip_pool={use_oriented_strip_pooling}, tangent_head={use_tangent_head}, use_s2_gate={use_s2_gate} (k={s2_gate_kernel_size})")
 
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
@@ -792,6 +803,7 @@ def main(args):
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
     lr_sage = sage_lr
+    lr_s2_gate = float(config.get('s2_gate_lr', 1e-3))
 
     two_stage = (
         getattr(args, 'two_stage', False)
@@ -805,10 +817,10 @@ def main(args):
         logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
         total_epochs = int(config.get('epochs', 30))
         patience = int(config.get('patience', 6))
-        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, SAGE LR: {lr_sage}, P3 LR: {p3_lr}")
-        logger.info(f"Single-Stage Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}")
+        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, SAGE LR: {lr_sage}, P3 LR: {p3_lr}, S2-Gate LR: {lr_s2_gate}")
+        logger.info(f"Single-Stage Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
 
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
         scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=warmup_epochs)
 
@@ -1175,8 +1187,8 @@ def main(args):
                 stage2_p3_lr=stage2_p3_lr,
             )
         else:
-            logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}")
-            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, weight_decay=0.05)
+            logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
+            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
             optimizer = optim.AdamW(param_groups)
 
         if is_low_lr and stage == 2:
