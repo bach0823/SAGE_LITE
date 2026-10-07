@@ -352,6 +352,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=14)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--top_k", type=int, default=None, choices=[1, 2, 3, 4, 6, 8], help="Override top_k capacity for all SAGE routers")
     parser.add_argument("--skip_train", action="store_true")
     args = parser.parse_args()
 
@@ -397,6 +398,12 @@ def main():
     # Load Base Model (with B1 Gate)
     print("\nLoading base model from checkpoint...")
     model = load_model_from_checkpoint(args.config, args.checkpoint, device=device)
+    if args.top_k is not None:
+        print(f"Applying top_k={args.top_k} capacity to all SAGE routers...")
+        from sage.components.router import SageRouter
+        for m in model.modules():
+            if isinstance(m, SageRouter):
+                m.top_k = args.top_k
     model.eval()
 
     # Instantiate Block 2 Gate
@@ -451,7 +458,8 @@ def main():
 
     dil_str = f"_d{args.dilation}" if args.dilation > 1 else ""
     ep_str = f"_e{args.epochs}" if args.epochs != 8 else ""
-    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}{dil_str}{ep_str}"
+    k_str = f"_topk{args.top_k}" if args.top_k is not None else ""
+    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}{dil_str}{ep_str}{k_str}"
     weights_path = os.path.join(args.out_dir, f"s2g_block2_{tag}_weights.pth")
     training_log_path = os.path.join(args.out_dir, f"training_log_{tag}.csv")
     val_csv_path = os.path.join(args.out_dir, f"validation_{tag}_per_sample.csv")
@@ -548,6 +556,7 @@ def main():
         "dilation": args.dilation,
         "epochs": args.epochs,
         "seed": args.seed,
+        "top_k": args.top_k,
         "N": len(df_val),
         "dice": float(df_val["dice"].mean()),
         "iou": float(df_val["iou"].mean()),
