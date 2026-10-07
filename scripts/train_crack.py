@@ -90,6 +90,7 @@ def create_stage2_optimizer(
     stage2_shared_lr: float,
     stage2_sage_lr: Optional[float] = None,
     stage2_p3_lr: Optional[float] = None,
+    stage2_s2_gate_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
 ) -> optim.Optimizer:
@@ -106,6 +107,8 @@ def create_stage2_optimizer(
         stage2_sage_lr = stage2_base_lr
     if stage2_p3_lr is None:
         stage2_p3_lr = stage2_base_lr
+    if stage2_s2_gate_lr is None:
+        stage2_s2_gate_lr = stage2_base_lr
     if shared_prefixes is None:
         shared_prefixes = DEFAULT_SHARED_PREFIXES
 
@@ -118,6 +121,8 @@ def create_stage2_optimizer(
         'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_sage_lr, 'name': 'sage'},
         'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
         'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
+        's2_gate_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_s2_gate_lr, 'name': 's2_gate'},
+        's2_gate_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_s2_gate_lr, 'name': 's2_gate'},
     }
 
     shared_param_ids = set()
@@ -136,6 +141,8 @@ def create_stage2_optimizer(
 
         if 'p3_refinement' in name:
             tier = 'p3'
+        elif 's2_gate' in name:
+            tier = 's2_gate'
         elif (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes):
             tier = 'shared'
         elif ('router' in name or 'sa_hub' in name or 'alpha' in name) and (stage2_sage_lr != stage2_base_lr):
@@ -1174,10 +1181,11 @@ def main(args):
                 stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
                 stage2_sage_lr = float(getattr(args, 'stage2_sage_lr', None) or config.get("stage2_sage_lr", stage2_base_lr))
                 stage2_p3_lr = float(getattr(args, 'stage2_p3_lr', None) or config.get("stage2_p3_lr", p3_lr))
+                stage2_s2_gate_lr = float(getattr(args, 'stage2_s2_gate_lr', None) or config.get("stage2_s2_gate_lr", config.get("s2_gate_lr", stage2_base_lr)))
 
             logger.info(
                 f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, "
-                f"base_lr={stage2_base_lr:.2e}, sage_lr={stage2_sage_lr:.2e}, p3_lr={stage2_p3_lr:.2e}"
+                f"base_lr={stage2_base_lr:.2e}, sage_lr={stage2_sage_lr:.2e}, p3_lr={stage2_p3_lr:.2e}, s2_gate_lr={stage2_s2_gate_lr:.2e}"
             )
             optimizer = create_stage2_optimizer(
                 model,
@@ -1185,6 +1193,7 @@ def main(args):
                 stage2_shared_lr=stage2_shared_lr,
                 stage2_sage_lr=stage2_sage_lr,
                 stage2_p3_lr=stage2_p3_lr,
+                stage2_s2_gate_lr=stage2_s2_gate_lr,
             )
         else:
             logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
@@ -1549,6 +1558,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--stage2-shared-lr', type=float, default=None, help='Override stage2_shared_lr')
     parser.add_argument('--stage2-sage-lr', type=float, default=None, help='Override stage2_sage_lr')
     parser.add_argument('--stage2-p3-lr', type=float, default=None, help='Override stage2_p3_lr')
+    parser.add_argument('--stage2-s2-gate-lr', type=float, default=None, help='Override stage2 S2-Gate learning rate')
     parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience')
     parser.add_argument('--cgsr', '--use-cgsr', action='store_true', dest='use_cgsr', default=None, help='Enable Context-Guided Stage-1 Skip Refinement (CGSR) for Phase 6D')
     parser.add_argument('--cgsr-init-bias', type=float, default=None, help='Initial bias for CGSR gate (default: 3.0)')
