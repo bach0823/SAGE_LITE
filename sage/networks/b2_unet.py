@@ -443,23 +443,23 @@ class B2ConvNeXtViTUNet(nn.Module):
                     f"0 other missing, 0 unexpected."
                 )
             return missing, unexpected
-        elif self.decoder.use_point_rend:
-            has_pr_keys = any('decoder.point_rend_head.' in k for k in state_dict.keys())
-            if has_pr_keys:
+        elif self.decoder.use_s2_gate:
+            has_s2g_keys = any('decoder.s2_gate.' in k for k in state_dict.keys())
+            if has_s2g_keys:
                 missing, unexpected = self.load_state_dict(state_dict, strict=True)
-                logger.info("Successfully loaded Stage 1 PointRend checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
+                logger.info("Successfully loaded Stage 1 S2-Gate checkpoint into Stage 2 (strict=True, 0 missing, 0 unexpected).")
             else:
                 missing, unexpected = self.load_state_dict(state_dict, strict=False)
-                pr_missing = [k for k in missing if 'decoder.point_rend_head.' in k]
-                other_missing = [k for k in missing if 'decoder.point_rend_head.' not in k]
+                s2g_missing = [k for k in missing if 'decoder.s2_gate.' in k]
+                other_missing = [k for k in missing if 'decoder.s2_gate.' not in k]
                 if len(other_missing) > 0 or len(unexpected) > 0:
                     raise ValueError(
-                        f"FATAL: Loading Candidate B Stage 1 checkpoint into PointRend model failed invariant check! "
+                        f"FATAL: Loading Candidate B Stage 1 checkpoint into S2-Gate model failed invariant check! "
                         f"Unexpected missing: {other_missing}, unexpected keys: {unexpected}"
                     )
                 logger.info(
-                    f"Successfully loaded Candidate B Stage 1 checkpoint into PointRend model. "
-                    f"{len(pr_missing)} PointRend head tensors freshly initialized, "
+                    f"Successfully loaded Candidate B Stage 1 checkpoint into S2-Gate model. "
+                    f"{len(s2g_missing)} S2-Gate tensors initialized to near-identity, "
                     f"0 other missing, 0 unexpected."
                 )
             return missing, unexpected
