@@ -617,6 +617,8 @@ def main(args):
         config['point_rend_subdivision_points'] = args.point_rend_subdivision_points
     if getattr(args, 'point_rend_mid_channels', None) is not None:
         config['point_rend_mid_channels'] = args.point_rend_mid_channels
+    if getattr(args, 'seed', None) is not None:
+        config['seed'] = args.seed
     if getattr(args, 'top_k', None) is not None:
         if 'sage_config' not in config:
             config['sage_config'] = {}
@@ -1507,6 +1509,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rng-checkpoint', type=str, default=None, help='Path to checkpoint containing RNG states (e.g. last_model_b2_stage1.pth) for Stage 2 resumption without restoring optimizer/scheduler')
     parser.add_argument('--data-root', type=str, default=None, help='Override dataset root_dir')
     parser.add_argument('--depth', type=int, default=None, help='Override num_transformer_layers (ViT depth)')
+    parser.add_argument('--seed', type=int, default=None, help='Override random seed')
+    parser.add_argument('--top-k', '--top_k', type=int, default=None, dest='top_k', help='Override SAGE router top_k capacity')
     parser.add_argument('--batch-size', type=int, default=None, help='Override training batch_size')
     parser.add_argument('--num-workers', type=int, default=None, help='Override DataLoader num_workers')
     parser.add_argument('--lr', type=float, default=None, help='Override base learning rate')
@@ -1537,7 +1541,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--point-rend-train-points', type=int, default=None, help='Number of points to sample during training (default: 2048)')
     parser.add_argument('--point-rend-subdivision-points', type=int, default=None, help='Number of points to refine during subdivision inference (default: 8192)')
     parser.add_argument('--point-rend-mid-channels', type=int, default=None, help='Hidden channels in Point Head MLP (default: 128)')
-    parser.add_argument('--top-k', '--top_k', type=int, default=None, dest='top_k', help='Override top_k capacity in SAGE routers (e.g. 3 or 4)')
     return parser
 
 

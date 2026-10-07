@@ -373,6 +373,12 @@ def load_model_from_checkpoint(
             state_dict = raw_checkpoint["state_dict"]
         else:
             state_dict = raw_checkpoint
+        if "sage_config" in raw_checkpoint and isinstance(raw_checkpoint["sage_config"], dict):
+            config.setdefault("sage_config", {}).update(raw_checkpoint["sage_config"])
+            for m in model.modules():
+                from sage.components.router import SageRouter
+                if isinstance(m, SageRouter) and "top_k" in raw_checkpoint["sage_config"]:
+                    m.top_k = int(raw_checkpoint["sage_config"]["top_k"])
     else:
         state_dict = raw_checkpoint
 

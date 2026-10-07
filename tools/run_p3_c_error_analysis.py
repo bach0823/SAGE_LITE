@@ -451,6 +451,12 @@ def main():
         print("[AUDIT PASS] Verified model is equipped with ProgressiveLearnedUpsamplingHead.")
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    if "sage_config" in ckpt and isinstance(ckpt["sage_config"], dict):
+        if "top_k" in ckpt["sage_config"]:
+            from sage.components.router import SageRouter
+            for m in model.modules():
+                if isinstance(m, SageRouter):
+                    m.top_k = int(ckpt["sage_config"]["top_k"])
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f"Successfully loaded checkpoint (recorded best_dice={ckpt.get('best_dice'):.4f}, epoch={ckpt.get('epoch')}).")
