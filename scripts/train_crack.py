@@ -89,24 +89,22 @@ def create_stage2_optimizer(
     stage2_base_lr: float,
     stage2_shared_lr: float,
     stage2_sage_lr: Optional[float] = None,
-    stage2_p3_lr: Optional[float] = None,
     stage2_s2_gate_lr: Optional[float] = None,
     shared_prefixes: Optional[Set[str]] = None,
     weight_decay: float = 0.05,
+    stage2_p3_lr: Optional[float] = None,  # Deprecated
 ) -> optim.Optimizer:
     """
     Construct Stage-2 optimizer parameter groups according to SAGE-Lite protocol:
     - Shared experts (4 CNN expert main blocks): stage2_shared_lr
     - Base / Other modules (ViT expert blocks, Routers, SA-Hub, Decoder, Bridge/interface layers): stage2_base_lr
     - SAGE routing/adaptation modules (Routers, SA-Hub, alpha) when stage2_sage_lr != stage2_base_lr: stage2_sage_lr
-    - P3 refinement (ASDW / Generic DW weights + gamma): stage2_p3_lr
-    - Each tier split into decay (weight_decay) and no_decay (0.0 for Norm/bias/gamma).
+    - S2-Gate (Spatial Modulation Gate): stage2_s2_gate_lr
+    - Each tier split into decay (weight_decay) and no_decay (0.0 for Norm/bias).
     - Partition assertions: 0 missing parameters, 0 duplicates.
     """
     if stage2_sage_lr is None:
         stage2_sage_lr = stage2_base_lr
-    if stage2_p3_lr is None:
-        stage2_p3_lr = stage2_base_lr
     if stage2_s2_gate_lr is None:
         stage2_s2_gate_lr = stage2_base_lr
     if shared_prefixes is None:
@@ -119,8 +117,6 @@ def create_stage2_optimizer(
         'others_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_base_lr, 'name': 'other_non_experts'},
         'sage_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_sage_lr, 'name': 'sage'},
         'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_sage_lr, 'name': 'sage'},
-        'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
-        'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_p3_lr, 'name': 'p3_refinement'},
         's2_gate_decay': {'params': [], 'weight_decay': weight_decay, 'lr': stage2_s2_gate_lr, 'name': 's2_gate'},
         's2_gate_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': stage2_s2_gate_lr, 'name': 's2_gate'},
     }
@@ -139,9 +135,7 @@ def create_stage2_optimizer(
 
         is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias') or 'gamma' in name.lower()
 
-        if 'p3_refinement' in name:
-            tier = 'p3'
-        elif 's2_gate' in name:
+        if 's2_gate' in name:
             tier = 's2_gate'
         elif (id(param) in shared_param_ids) or any(name.startswith(p) for p in shared_prefixes):
             tier = 'shared'
@@ -170,20 +164,17 @@ def create_stage2_optimizer(
 
     return optim.AdamW(param_groups)
 
-def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=None, lr_s2_gate=None, weight_decay=0.05):
+def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_s2_gate=None, weight_decay=0.05, lr_p3=None):
     """
     Construct optimizer parameter groups categorized by learning rate tiers and weight decay:
     - Backbone (pretrained ConvNeXt stages and ViT blocks): lr_backbone (1e-5)
     - Decoder & Interface (UNet decoder and newly initialized hybrid bridge layers): lr_decoder (1e-4)
     - SAGE components (routers, SA-Hub adapters, adaptive fusion alpha): lr_sage (1e-4)
-    - P3 refinement (ASDW / Generic DW): lr_p3 (1e-4)
     - S2-Gate (Spatial Modulation Gate): lr_s2_gate (default: 1e-3 if present or lr_decoder)
-    - Weight decay: 0.0 for LayerNorm/Norm, biases, and gamma; weight_decay (0.05) for weights.
+    - Weight decay: 0.0 for LayerNorm/Norm and biases; weight_decay (0.05) for weights.
     """
     if lr_sage is None:
         lr_sage = lr_decoder
-    if lr_p3 is None:
-        lr_p3 = lr_decoder
     if lr_s2_gate is None:
         lr_s2_gate = lr_decoder
 
@@ -202,8 +193,6 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=Non
         'decoder_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_decoder, 'name': 'decoder'},
         'sage_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_sage, 'name': 'sage'},
         'sage_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_sage, 'name': 'sage'},
-        'p3_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_p3, 'name': 'p3_refinement'},
-        'p3_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_p3, 'name': 'p3_refinement'},
         's2_gate_decay': {'params': [], 'weight_decay': weight_decay, 'lr': lr_s2_gate, 'name': 's2_gate'},
         's2_gate_no_decay': {'params': [], 'weight_decay': 0.0, 'lr': lr_s2_gate, 'name': 's2_gate'},
     }
@@ -214,9 +203,7 @@ def get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=None, lr_p3=Non
             
         is_no_decay = 'layernorm' in name.lower() or 'norm' in name.lower() or name.endswith('.bias') or 'gamma' in name.lower()
         
-        if 'p3_refinement' in name:
-            tier = 'p3'
-        elif 's2_gate' in name:
+        if 's2_gate' in name:
             tier = 's2_gate'
         elif 'router' in name or 'sa_hub' in name or 'alpha' in name:
             tier = 'sage'
@@ -746,21 +733,9 @@ def main(args):
         logger.info(f"Loading checkpoint from {generic_ckpt_path} (resume/continue mechanism)...")
         ckpt = torch.load(generic_ckpt_path, map_location=device, weights_only=False)
         sd = ckpt.get('model_state_dict', ckpt)
+        # Strip legacy p3_refinement keys to ensure clean loading
+        sd = {k: v for k, v in sd.items() if 'p3_refinement' not in k}
         model.load_state_dict(sd, strict=False)
-    else:
-        if p3_mode in ("A", "B", "C"):
-            logger.info(f"P3-{p3_mode} Standalone Initialization: ImageNet-pretrained, no parent checkpoint")
-
-    # Initialize gamma parameters for P3
-    gamma_init_val = float(config.get('gamma_init', 0.01))
-    if p3_mode is not None:
-        if (is_stage2_extension or is_stage2_only) and generic_ckpt_path:
-            g0, g1 = get_p3_gamma_values(model)
-            logger.info(f"P3 Refinement gamma preserved from checkpoint: S0={g0:.4f}, S1={g1:.4f}")
-        else:
-            set_p3_gamma_init(model, gamma_init_val)
-            g0, g1 = get_p3_gamma_values(model)
-            logger.info(f"P3 Refinement gamma initialized: S0={g0:.4f}, S1={g1:.4f}")
 
     boundary_iou_weight = float(config.get('boundary_iou_weight', 0.0))
     boundary_iou_dilation = int(config.get('boundary_iou_dilation', 2))
@@ -805,7 +780,6 @@ def main(args):
 
     base_lr = float(config.get('lr', 1e-4))
     sage_lr = float(config.get('sage_lr', base_lr))
-    p3_lr = float(config.get('p3_lr', base_lr))
     warmup_epochs = int(config.get('warmup_epochs', 3))
     lr_backbone = base_lr * 0.1
     lr_decoder = base_lr
@@ -824,10 +798,10 @@ def main(args):
         logger.info(f"\n{'='*50}\nSTARTING SINGLE-STAGE TRAINING ({model_type})\n{'='*50}")
         total_epochs = int(config.get('epochs', 30))
         patience = int(config.get('patience', 6))
-        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, SAGE LR: {lr_sage}, P3 LR: {p3_lr}, S2-Gate LR: {lr_s2_gate}")
-        logger.info(f"Single-Stage Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
+        logger.info(f"Total epochs: {total_epochs}, Patience: {patience}, Base LR: {base_lr}, SAGE LR: {lr_sage}, S2-Gate LR: {lr_s2_gate}")
+        logger.info(f"Single-Stage Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
 
-        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
+        param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
         optimizer = optim.AdamW(param_groups)
         scheduler = get_scheduler(optimizer, epochs=total_epochs, warmup_epochs=warmup_epochs)
 
@@ -959,7 +933,7 @@ def main(args):
             bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
             dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
             sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
-            p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
+            s2g_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 's2_gate'), None)
 
             if shared_lr is not None:
                 lr_str = f"Shared={shared_lr:.2e}, Base={base_lr_val:.2e}"
@@ -967,9 +941,8 @@ def main(args):
                 lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
                 if sage_lr is not None:
                     lr_str += f", SAGE={sage_lr:.2e}"
-            if p3_lr_cur is not None:
-                g0, g1 = get_p3_gamma_values(model)
-                lr_str += f", P3={p3_lr_cur:.2e} (gamma: S0={g0:.4f}, S1={g1:.4f})"
+                if s2g_lr is not None:
+                    lr_str += f", S2G={s2g_lr:.2e}"
             logger.info(f"Epoch {epoch}/{total_epochs} - Train Loss: {train_loss:.4f} (LB: {train_lb_loss:.4f}), Train Dice: {train_dice:.4f} | Val Loss: {val_loss:.4f}, Val Dice: {val_dice:.4f} | LR: {lr_str}")
             if hasattr(model, 'decoder') and hasattr(model.decoder, 'strip_pool_56') and model.decoder.strip_pool_56 is not None:
                 g_mean, g_std = model.decoder.strip_pool_56.get_gate_stats()
@@ -1133,10 +1106,6 @@ def main(args):
             stage1_max=stage1_max,
             logger=logger,
         )
-        if p3_mode is not None:
-            g0, g1 = get_p3_gamma_values(model)
-            logger.info(f"Stage 2 learned gamma confirmed: S0={g0:.4f}, S1={g1:.4f}")
-    
     for stage in stages_to_run:
         logger.info(f"\n{'='*40}\nSTARTING STAGE {stage}\n{'='*40}")
         
@@ -1157,6 +1126,7 @@ def main(args):
                     logger.info(f"Loading best Stage 1 checkpoint from {stage1_ckpt_path}")
                     checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
                     ckpt_sd = checkpoint.get('model_state_dict', checkpoint)
+                    ckpt_sd = {k: v for k, v in ckpt_sd.items() if 'p3_refinement' not in k}
                     if hasattr(model, 'load_stage1_state_dict'):
                         model.load_stage1_state_dict(ckpt_sd)
                     else:
@@ -1175,31 +1145,28 @@ def main(args):
                 stage2_base_lr = target_lr
                 stage2_shared_lr = target_lr
                 stage2_sage_lr = target_lr
-                stage2_p3_lr = target_lr
                 stage2_s2_gate_lr = target_lr
                 logger.info(f"Stage 2 Low-LR Extension: keeping constant LR floor={target_lr:.2e} across all groups")
             else:
                 stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
                 stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
                 stage2_sage_lr = float(getattr(args, 'stage2_sage_lr', None) or config.get("stage2_sage_lr", stage2_base_lr))
-                stage2_p3_lr = float(getattr(args, 'stage2_p3_lr', None) or config.get("stage2_p3_lr", p3_lr))
                 stage2_s2_gate_lr = float(getattr(args, 'stage2_s2_gate_lr', None) or config.get("stage2_s2_gate_lr", config.get("s2_gate_lr", stage2_base_lr)))
 
             logger.info(
                 f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, "
-                f"base_lr={stage2_base_lr:.2e}, sage_lr={stage2_sage_lr:.2e}, p3_lr={stage2_p3_lr:.2e}, s2_gate_lr={stage2_s2_gate_lr:.2e}"
+                f"base_lr={stage2_base_lr:.2e}, sage_lr={stage2_sage_lr:.2e}, s2_gate_lr={stage2_s2_gate_lr:.2e}"
             )
             optimizer = create_stage2_optimizer(
                 model,
                 stage2_base_lr=stage2_base_lr,
                 stage2_shared_lr=stage2_shared_lr,
                 stage2_sage_lr=stage2_sage_lr,
-                stage2_p3_lr=stage2_p3_lr,
                 stage2_s2_gate_lr=stage2_s2_gate_lr,
             )
         else:
-            logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, p3_lr={p3_lr:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
-            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_p3=p3_lr, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
+            logger.info(f"Stage 1 Optimizer: backbone_lr={lr_backbone:.2e}, decoder_lr={lr_decoder:.2e}, sage_lr={lr_sage:.2e}, s2_gate_lr={lr_s2_gate:.2e}")
+            param_groups = get_optimizer_groups(model, lr_backbone, lr_decoder, lr_sage=lr_sage, lr_s2_gate=lr_s2_gate, weight_decay=0.05)
             optimizer = optim.AdamW(param_groups)
 
         if is_low_lr and stage == 2:
@@ -1365,25 +1332,22 @@ def main(args):
                 sh_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'shared_experts'), 0.0)
                 oth_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') in ('other_non_experts', 'other_and_routers')), 0.0)
                 sg_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
-                p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
+                s2g_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 's2_gate'), None)
                 lr_str = f"Shared={sh_lr:.2e}, Base={oth_lr:.2e}"
                 if sg_lr is not None:
                     lr_str += f", SAGE={sg_lr:.2e}"
-                if p3_lr_cur is not None:
-                    lr_str += f", P3={p3_lr_cur:.2e}"
+                if s2g_lr is not None:
+                    lr_str += f", S2G={s2g_lr:.2e}"
             else:
                 bb_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'backbone'), 0.0)
                 dec_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'decoder'), 0.0)
                 sage_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'sage'), None)
-                p3_lr_cur = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'p3_refinement'), None)
+                s2g_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 's2_gate'), None)
                 lr_str = f"BB={bb_lr:.2e}, Dec={dec_lr:.2e}"
                 if sage_lr is not None:
                     lr_str += f", SAGE={sage_lr:.2e}"
-                if p3_lr_cur is not None:
-                    lr_str += f", P3={p3_lr_cur:.2e}"
-            g0, g1 = get_p3_gamma_values(model)
-            if g0 is not None or g1 is not None:
-                lr_str += f" (gamma: S0={g0:.4f}, S1={g1:.4f})"
+                if s2g_lr is not None:
+                    lr_str += f", S2G={s2g_lr:.2e}"
 
             if use_cgsr and hasattr(model, 'decoder') and hasattr(model.decoder, 'decoder_blocks') and len(model.decoder.decoder_blocks) > 1:
                 cgsr_mod = getattr(model.decoder.decoder_blocks[1], 'cgsr', None)

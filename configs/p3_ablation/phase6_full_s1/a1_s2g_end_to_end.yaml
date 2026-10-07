@@ -1,6 +1,5 @@
 model: B2
 num_transformer_layers: 4
-p3_mode: "C"
 seed: 42
 img_size: 448
 batch_size: 14
@@ -14,15 +13,12 @@ two_stage: true
 # Stage 1 Learning Rates: S2-Gate có LR riêng (1e-3)
 lr: 1e-4
 sage_lr: 2e-4
-p3_lr: 1e-4
 s2_gate_lr: 1e-3
 
 # Stage 2 Learning Rates: S2-Gate dùng chung base LR (1e-4)
 stage2_base_lr: 1e-4
 stage2_shared_lr: 1e-4
-stage2_p3_lr: 1e-4
 stage2_sage_lr: 1e-4
-gamma_init: 0.01
 
 output_dir: "results/phase6_combination/phase6_a1_s2g_end_to_end"
 mask_suffix: ""

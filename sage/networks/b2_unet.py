@@ -152,20 +152,18 @@ class B2ConvNeXtViTUNet(nn.Module):
             s2_gate_block2_dilation=s2_gate_block2_dilation,
         )
 
-        # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
-        if p3_mode in ("A", "B", "C"):
-            orig_grid = 14
-            pos_4d = (
-                self.backbone.positional_embeddings.detach()
-                .reshape(1, orig_grid, orig_grid, -1)
-                .permute(0, 3, 1, 2)
-            )
-            pos28_4d = F.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
-            pe28_tensor = pos28_4d.permute(0, 2, 3, 1).flatten(1, 2).detach().float()
-            self.backbone.register_buffer("pe28_fixed", pe28_tensor, persistent=True)
-            pe_owner = self.backbone
-        else:
-            pe_owner = None
+        # 4. Default: Register canonical pe28_fixed persistent buffer on backbone from PE14
+        # Stage 0 and Stage 1 by default use spatial compression (28x28) when calling ViT experts
+        orig_grid = 14
+        pos_4d = (
+            self.backbone.positional_embeddings.detach()
+            .reshape(1, orig_grid, orig_grid, -1)
+            .permute(0, 3, 1, 2)
+        )
+        pos28_4d = F.interpolate(pos_4d, size=(28, 28), mode="bicubic", align_corners=False)
+        pe28_tensor = pos28_4d.permute(0, 2, 3, 1).flatten(1, 2).detach().float()
+        self.backbone.register_buffer("pe28_fixed", pe28_tensor, persistent=True)
+        pe_owner = self.backbone
 
         # 5. Inject SAGE wrappers in-place and construct shared expert pool
         self.expert_pool = inject_sage_layers(
@@ -175,7 +173,6 @@ class B2ConvNeXtViTUNet(nn.Module):
             stem_channels=self.backbone.stem_channels,
             transformer_dim=self.backbone.transformer_dim,
             sage_config=self.sage_config,
-            p3_mode=p3_mode,
             pe_owner=pe_owner,
         )
 
@@ -386,16 +383,10 @@ class B2ConvNeXtViTUNet(nn.Module):
     def load_stage1_state_dict(self, state_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """
         Loads Stage 1 checkpoint state_dict into the model for Stage 2 joint training.
-
-        - For baseline B2 model (use_plu_head is False):
-          Strict loading of canonical Stage 1 checkpoint.
-        - For Phase 6-A.2 Pure PLU model (use_plu_head is True):
-          Strict loading of A2's own Stage 1 PLU checkpoint (trained from scratch).
-          All tensors (backbone, SAGE, decoder, conv112, norm112, up224, norm224, up448) must match strictly.
-          Safeguard: If a legacy baseline checkpoint (containing 'decoder.segmentation_head.0.*' or
-          'decoder.segmentation_head.3.*') is provided, raises ValueError to prevent accidental
-          cross-lineage contamination or uninitialized upsampling head gradient shocks.
         """
+        # Strip legacy p3_refinement keys from state_dict to allow seamless loading of older checkpoints
+        state_dict = {k: v for k, v in state_dict.items() if 'p3_refinement' not in k}
+
         if self.use_plu_head:
             has_baseline_keys = any(
                 k.startswith('decoder.segmentation_head.0.') or k.startswith('decoder.segmentation_head.3.')

@@ -259,11 +259,10 @@ class SageLayer(nn.Module):
                     and getattr(self, "stage_idx", None) in (0, 1)
                     and getattr(expert, "expert_type", None) == "transformer"
                 ):
-                    # Step 4a (P3): High-Resolution CNN (S0/S1) -> ViT Expert
+                    # Step 4a: Spatial Compression (28x28) from CNN (S0/S1) -> ViT Expert
                     # S0 feature is x (C=48, 112x112); S1 feature is main_output (C=96, 56x56)
                     feat_sub = main_output[original_batch_indices] if getattr(self, "stage_idx", None) == 1 else x[original_batch_indices]
-                    x_refined = self.p3_refinement(feat_sub) if self.p3_refinement is not None else feat_sub
-                    x_compressed = F.adaptive_avg_pool2d(x_refined, (28, 28))
+                    x_compressed = F.adaptive_avg_pool2d(feat_sub, (28, 28))
                     x_tokens = x_compressed.flatten(2).transpose(1, 2).contiguous()
                     adapted_input = self.sa_hub._adapt_channels(x_tokens, 192)
 

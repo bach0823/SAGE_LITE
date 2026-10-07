@@ -4,7 +4,6 @@ import torch.nn as nn
 from sage.components.sage_layer import SageLayer, create_sage_layer
 from sage.components.router import create_sage_router
 from sage.components.sa_hub import SAHub
-from sage.components.p3_refinement import ASDWRefinement, GenericRefinement
 
 from .wrappers import TupleSafeWrapper
 
@@ -60,16 +59,6 @@ def inject_sage_layers(
             config=router_config,
         )
 
-        p3_mod = None
-        if p3_mode in ("A", "B", "C") and stage_idx in (0, 1):
-            ch = 48 if stage_idx == 0 else 96
-            if p3_mode == "C":
-                p3_mod = ASDWRefinement(channels=ch)
-            elif p3_mode == "B":
-                p3_mod = GenericRefinement(channels=ch)
-            elif p3_mode == "A":
-                p3_mod = nn.Identity()
-
         sage_wrapper = create_sage_layer(
             main_block=TupleSafeWrapper(original_stage),
             router=router,
@@ -78,7 +67,7 @@ def inject_sage_layers(
             my_index=stage_idx,
             layer_type="cnn",
             stage_idx=stage_idx,
-            p3_refinement=p3_mod,
+            p3_refinement=None,
         )
 
         if pe_owner is not None and stage_idx in (0, 1):
