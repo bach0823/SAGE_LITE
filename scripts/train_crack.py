@@ -1174,7 +1174,9 @@ def main(args):
                 target_lr = float(getattr(args, 'low_lr', None) or getattr(args, 'stage2_base_lr', None) or 1e-6)
                 stage2_base_lr = target_lr
                 stage2_shared_lr = target_lr
+                stage2_sage_lr = target_lr
                 stage2_p3_lr = target_lr
+                stage2_s2_gate_lr = target_lr
                 logger.info(f"Stage 2 Low-LR Extension: keeping constant LR floor={target_lr:.2e} across all groups")
             else:
                 stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
