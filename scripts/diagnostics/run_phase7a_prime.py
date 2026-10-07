@@ -31,21 +31,29 @@ def run_step(cmd, desc):
     print(f"[{desc}] Finished in {dt:.1f}s ({dt/60.0:.2f} min)")
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Phase 7A' 3-way kernel probe runner")
+    parser.add_argument("--epochs", type=int, default=14)
+    args = parser.parse_args()
+
     out_dir = os.path.join(project_root, "results", "diagnostics", "phase7_s2_gate_block2")
     os.makedirs(out_dir, exist_ok=True)
     script_path = os.path.join(project_root, "scripts", "diagnostics", "train_eval_phase7_s2_gate_block2.py")
+
+    epochs = str(args.epochs)
+    ep_suffix = f"_e{args.epochs}" if args.epochs != 8 else ""
 
     # 1. Kernel 1x1
     cmd_k1 = [
         sys.executable, script_path,
         "--kernel_size", "1",
         "--lr", "1e-3",
-        "--epochs", "8",
+        "--epochs", epochs,
         "--seed", "42",
         "--batch_size", "14",
         "--out_dir", out_dir,
     ]
-    run_step(cmd_k1, "Phase 7A' Kernel Probe: 1x1 (4,737 params)")
+    run_step(cmd_k1, f"Phase 7A' Kernel Probe: 1x1 ({epochs} ep, 4,737 params)")
 
     # 2. Kernel 3x3 (dilation=1)
     cmd_k3 = [
@@ -53,12 +61,12 @@ def main():
         "--kernel_size", "3",
         "--dilation", "1",
         "--lr", "1e-3",
-        "--epochs", "8",
+        "--epochs", epochs,
         "--seed", "42",
         "--batch_size", "14",
         "--out_dir", out_dir,
     ]
-    run_step(cmd_k3, "Phase 7A' Kernel Probe: 3x3 d=1 (41,601 params)")
+    run_step(cmd_k3, f"Phase 7A' Kernel Probe: 3x3 d=1 ({epochs} ep, 41,601 params)")
 
     # 3. Kernel 3x3 (dilation=2)
     cmd_k3_d2 = [
@@ -66,17 +74,17 @@ def main():
         "--kernel_size", "3",
         "--dilation", "2",
         "--lr", "1e-3",
-        "--epochs", "8",
+        "--epochs", epochs,
         "--seed", "42",
         "--batch_size", "14",
         "--out_dir", out_dir,
     ]
-    run_step(cmd_k3_d2, "Phase 7A' Kernel Probe: 3x3 d=2 (41,601 params, effective RF 5x5)")
+    run_step(cmd_k3_d2, f"Phase 7A' Kernel Probe: 3x3 d=2 ({epochs} ep, 41,601 params, effective RF 5x5)")
 
     # 4. Compile comparison summary
-    p_k1 = os.path.join(out_dir, "summary_lr_1e-03_k1.json")
-    p_k3 = os.path.join(out_dir, "summary_lr_1e-03_k3.json")
-    p_k3_d2 = os.path.join(out_dir, "summary_lr_1e-03_k3_d2.json")
+    p_k1 = os.path.join(out_dir, f"summary_lr_1e-03_k1{ep_suffix}.json")
+    p_k3 = os.path.join(out_dir, f"summary_lr_1e-03_k3{ep_suffix}.json")
+    p_k3_d2 = os.path.join(out_dir, f"summary_lr_1e-03_k3_d2{ep_suffix}.json")
 
     s_k1 = json.load(open(p_k1)) if os.path.exists(p_k1) else {}
     s_k3 = json.load(open(p_k3)) if os.path.exists(p_k3) else {}
@@ -86,14 +94,15 @@ def main():
         "Phase": "7A' Kernel & Dilation Probe",
         "Base_Model": "a1_s2g_end_to_end (Val Dice 0.7676, B1 Gate Conv3x3)",
         "LR": 1e-3,
-        "Epochs": 8,
+        "Epochs": args.epochs,
         "Seed": 42,
         "Kernel_1x1": s_k1,
         "Kernel_3x3_d1": s_k3,
         "Kernel_3x3_d2": s_k3_d2,
     }
 
-    comp_path = os.path.join(out_dir, "phase7a_prime_comparison.json")
+    comp_filename = f"phase7a_prime_comparison{ep_suffix}.json"
+    comp_path = os.path.join(out_dir, comp_filename)
     with open(comp_path, "w", encoding="utf-8") as f:
         json.dump(comparison, f, indent=2)
 

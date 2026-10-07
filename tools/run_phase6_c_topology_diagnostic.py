@@ -233,9 +233,29 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         pretrained=False,
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-    model.load_state_dict(state_dict)
+    if not os.path.exists(checkpoint_path):
+        print(f"[Warning] Checkpoint {checkpoint_path} not found.")
+        # Auto-fallback candidates for Colab/fresh environments
+        fallback_cand_b = "/content/results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"
+        fallback_u1 = "/content/SAGE_LITE/results/diagnostics/phase6_u1_s2g/u1_s2g_weights.pth"
+        if os.path.exists(fallback_cand_b):
+            print(f"[Fallback] Loading base weights from Candidate B: {fallback_cand_b}")
+            ckpt_b = torch.load(fallback_cand_b, map_location=device, weights_only=False)
+            sd_b = ckpt_b["model_state_dict"] if "model_state_dict" in ckpt_b else ckpt_b
+            model.load_state_dict(sd_b, strict=False)
+            if use_s2_gate and model.decoder.s2_gate is not None and os.path.exists(fallback_u1):
+                print(f"[Fallback] Initializing S2-Gate Block 1 from {fallback_u1}")
+                u1_dict = torch.load(fallback_u1, map_location=device, weights_only=False)
+                u1_sd = u1_dict["s2_gate_state"] if "s2_gate_state" in u1_dict else u1_dict
+                model.decoder.s2_gate.warm_start_from_v1(u1_sd)
+            checkpoint_path = fallback_cand_b
+        else:
+            raise FileNotFoundError(f"Neither {checkpoint_path} nor fallback {fallback_cand_b} exists!")
+
+    if os.path.exists(checkpoint_path) and "P3_C_D4_K2_H64" not in checkpoint_path:
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+        model.load_state_dict(state_dict)
 
     if turn_off_asdw and hasattr(model.backbone, "convnext"):
         for stage in model.backbone.convnext.stages[:2]:

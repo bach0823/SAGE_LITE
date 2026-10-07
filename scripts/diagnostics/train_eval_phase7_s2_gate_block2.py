@@ -450,7 +450,8 @@ def main():
     assert len(val_files) == 348, f"Expected 348 validation images, got {len(val_files)}"
 
     dil_str = f"_d{args.dilation}" if args.dilation > 1 else ""
-    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}{dil_str}"
+    ep_str = f"_e{args.epochs}" if args.epochs != 8 else ""
+    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}{dil_str}{ep_str}"
     weights_path = os.path.join(args.out_dir, f"s2g_block2_{tag}_weights.pth")
     training_log_path = os.path.join(args.out_dir, f"training_log_{tag}.csv")
     val_csv_path = os.path.join(args.out_dir, f"validation_{tag}_per_sample.csv")
