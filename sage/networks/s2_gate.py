@@ -32,17 +32,26 @@ class S2GateModule(nn.Module):
         skip_channels: int = 96,
         mid_channels: int = 32,
         kernel_size: int = 1,
+        dilation: int = 1,
     ):
         super().__init__()
         self.s2_channels = s2_channels
         self.skip_channels = skip_channels
         self.mid_channels = mid_channels
         self.kernel_size = kernel_size
-        padding = kernel_size // 2
+        self.dilation = dilation
+        padding = (kernel_size // 2) * dilation
 
         # Gate MLP: compress s2_up (192) + skip_s1 (96) = 288 channels -> mid (32) -> 1 spatial gate
         self.gate_net = nn.Sequential(
-            nn.Conv2d(s2_channels + skip_channels, mid_channels, kernel_size=kernel_size, padding=padding, bias=True),
+            nn.Conv2d(
+                s2_channels + skip_channels,
+                mid_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                dilation=dilation,
+                bias=True,
+            ),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, 1, kernel_size=1, bias=True),

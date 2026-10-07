@@ -93,6 +93,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         s2_gate_kernel_size: int = 3,
         use_s2_gate_block2: bool = False,
         s2_gate_block2_kernel_size: int = 3,
+        s2_gate_block2_dilation: int = 1,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -112,6 +113,7 @@ class B2ConvNeXtViTUNet(nn.Module):
         self.s2_gate_kernel_size = s2_gate_kernel_size
         self.use_s2_gate_block2 = use_s2_gate_block2
         self.s2_gate_block2_kernel_size = s2_gate_block2_kernel_size
+        self.s2_gate_block2_dilation = s2_gate_block2_dilation
 
         # 1. Merge SAGE config with defaults
         self.sage_config = dict(DEFAULT_SAGE_CONFIG)
@@ -147,6 +149,7 @@ class B2ConvNeXtViTUNet(nn.Module):
             s2_gate_kernel_size=s2_gate_kernel_size,
             use_s2_gate_block2=use_s2_gate_block2,
             s2_gate_block2_kernel_size=s2_gate_block2_kernel_size,
+            s2_gate_block2_dilation=s2_gate_block2_dilation,
         )
 
         # 4. If P3 enabled, register single canonical pe28_fixed persistent buffer on backbone from PE14
@@ -488,6 +491,7 @@ def create_b2_unet(
     s2_gate_kernel_size: int = 3,
     use_s2_gate_block2: bool = False,
     s2_gate_block2_kernel_size: int = 3,
+    s2_gate_block2_dilation: int = 1,
 ) -> B2ConvNeXtViTUNet:
     """
     Factory function for Full SAGE-Lite Model (Baseline Ladder B2).
@@ -515,5 +519,6 @@ def create_b2_unet(
         s2_gate_kernel_size=s2_gate_kernel_size,
         use_s2_gate_block2=use_s2_gate_block2,
         s2_gate_block2_kernel_size=s2_gate_block2_kernel_size,
+        s2_gate_block2_dilation=s2_gate_block2_dilation,
     )
 

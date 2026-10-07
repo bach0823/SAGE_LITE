@@ -153,14 +153,14 @@ Thiết lập: 8 epochs, AdamW (wd=1e-2), CosineAnnealingLR, `seed=42`, Block 1 
 
 ## 7A' — Kernel Probe (1×1 vs 3×3)
 
-Tại LR đã chọn từ 7A, huấn luyện độc lập từ đầu 8 epochs (`seed=42`):
+Tại LR=1e-3 (theo yêu cầu trực tiếp của người dùng triển khai sớm 7A'), huấn luyện độc lập từ đầu 8 epochs (`seed=42`, batch size 14, AdamW wd=1e-2, CosineAnnealingLR):
 
 | Kernel | LR | Seed | Parameters | Val Dice | Precision | Recall | Thin Dice | Bridges (43) | Status |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `1x1` | Selected | 42 | 4,737 | *Chờ chạy* | — | — | — | — | QUEUED |
-| `3x3` | Selected | 42 | 41,601 | *Chờ chạy* | — | — | — | — | QUEUED |
+| `1x1` | 1e-3 | 42 | 4,737 | *Đang chạy* | — | — | — | — | **IN PROGRESS (Background Task)** |
+| `3x3` | 1e-3 | 42 | 41,601 | *Xếp hàng* | — | — | — | — | QUEUED |
 
-- **Selected Kernel:** *Sẽ khóa sau 7A'*
+- **Selected Kernel:** *Sẽ cập nhật ngay khi 2 run hoàn tất.*
 
 ---
 

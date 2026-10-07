@@ -348,6 +348,7 @@ def main():
     parser.add_argument("--out_dir", type=str, default="results/diagnostics/phase7_s2_gate_block2")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--kernel_size", type=int, default=3, choices=[1, 3])
+    parser.add_argument("--dilation", type=int, default=1, choices=[1, 2, 4])
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=14)
     parser.add_argument("--seed", type=int, default=42)
@@ -404,6 +405,7 @@ def main():
         skip_channels=48,
         mid_channels=32,
         kernel_size=args.kernel_size,
+        dilation=args.dilation,
     ).to(device)
 
     model.decoder.s2_gate_block2 = s2_gate_b2
@@ -447,7 +449,8 @@ def main():
 
     assert len(val_files) == 348, f"Expected 348 validation images, got {len(val_files)}"
 
-    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}"
+    dil_str = f"_d{args.dilation}" if args.dilation > 1 else ""
+    tag = f"lr_{args.lr:.0e}_k{args.kernel_size}{dil_str}"
     weights_path = os.path.join(args.out_dir, f"s2g_block2_{tag}_weights.pth")
     training_log_path = os.path.join(args.out_dir, f"training_log_{tag}.csv")
     val_csv_path = os.path.join(args.out_dir, f"validation_{tag}_per_sample.csv")
@@ -541,6 +544,7 @@ def main():
         "tag": tag,
         "lr": args.lr,
         "kernel_size": args.kernel_size,
+        "dilation": args.dilation,
         "epochs": args.epochs,
         "seed": args.seed,
         "N": len(df_val),

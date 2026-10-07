@@ -230,6 +230,7 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         s2_gate_kernel_size=s2_gate_kernel_size,
         use_s2_gate_block2=use_s2_gate_block2,
         s2_gate_block2_kernel_size=s2_gate_block2_kernel_size,
+        pretrained=False,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)

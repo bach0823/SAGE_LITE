@@ -248,6 +248,7 @@ class UNetDecoder(nn.Module):
         s2_gate_kernel_size: int = 3,
         use_s2_gate_block2: bool = False,
         s2_gate_block2_kernel_size: int = 3,
+        s2_gate_block2_dilation: int = 1,
     ):
         super().__init__()
         self.encoder_channels = encoder_channels
@@ -266,6 +267,7 @@ class UNetDecoder(nn.Module):
         self.s2_gate_kernel_size = s2_gate_kernel_size
         self.use_s2_gate_block2 = use_s2_gate_block2
         self.s2_gate_block2_kernel_size = s2_gate_block2_kernel_size
+        self.s2_gate_block2_dilation = s2_gate_block2_dilation
 
         if self.use_s2_gate:
             self.s2_gate = S2GateModule(
@@ -281,6 +283,7 @@ class UNetDecoder(nn.Module):
                 s2_channels=96,
                 skip_channels=48,
                 kernel_size=s2_gate_block2_kernel_size,
+                dilation=s2_gate_block2_dilation,
             )
         else:
             self.s2_gate_block2 = None
