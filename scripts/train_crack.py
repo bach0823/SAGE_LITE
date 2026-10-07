@@ -617,6 +617,10 @@ def main(args):
         config['point_rend_subdivision_points'] = args.point_rend_subdivision_points
     if getattr(args, 'point_rend_mid_channels', None) is not None:
         config['point_rend_mid_channels'] = args.point_rend_mid_channels
+    if getattr(args, 'top_k', None) is not None:
+        if 'sage_config' not in config:
+            config['sage_config'] = {}
+        config['sage_config']['top_k'] = args.top_k
 
     set_seed(config.get('seed', 42))
 
@@ -1533,6 +1537,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--point-rend-train-points', type=int, default=None, help='Number of points to sample during training (default: 2048)')
     parser.add_argument('--point-rend-subdivision-points', type=int, default=None, help='Number of points to refine during subdivision inference (default: 8192)')
     parser.add_argument('--point-rend-mid-channels', type=int, default=None, help='Hidden channels in Point Head MLP (default: 128)')
+    parser.add_argument('--top-k', '--top_k', type=int, default=None, dest='top_k', help='Override top_k capacity in SAGE routers (e.g. 3 or 4)')
     return parser
 
 
