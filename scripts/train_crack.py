@@ -1157,7 +1157,7 @@ def main(args):
                 stage2_base_lr = float(getattr(args, 'stage2_base_lr', None) or config.get("stage2_base_lr", base_lr))
                 stage2_shared_lr = float(getattr(args, 'stage2_shared_lr', None) or config.get("stage2_shared_lr", base_lr))
                 stage2_sage_lr = float(getattr(args, 'stage2_sage_lr', None) or config.get("stage2_sage_lr", stage2_base_lr))
-                stage2_s2_gate_lr = float(getattr(args, 'stage2_s2_gate_lr', None) or config.get("stage2_s2_gate_lr", config.get("s2_gate_lr", stage2_base_lr)))
+                stage2_s2_gate_lr = float(getattr(args, 'stage2_s2_gate_lr', None) or config.get("stage2_s2_gate_lr", stage2_base_lr))
 
             logger.info(
                 f"Stage 2 Optimizer: shared_lr={stage2_shared_lr:.2e}, "
