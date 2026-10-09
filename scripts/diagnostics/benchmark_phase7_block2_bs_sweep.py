@@ -118,7 +118,9 @@ def test_single_bs_block2(
 
     model = None
     try:
-        model = load_model_from_checkpoint(config_path, checkpoint_path, device=device)
+        model = load_model_from_checkpoint(
+            config_path, checkpoint_path, device=device, allow_random_weights=True
+        )
         model.eval()
 
         s2_gate_b2 = S2GateModule(

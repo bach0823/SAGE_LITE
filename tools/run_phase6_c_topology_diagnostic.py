@@ -185,11 +185,18 @@ def compute_topology_metrics(pred_bin: np.ndarray, target_bin: np.ndarray) -> Di
     }
 
 
-def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: torch.device, turn_off_asdw: bool = True):
+def load_model_from_checkpoint(
+    config_path: str,
+    checkpoint_path: str,
+    device: torch.device,
+    turn_off_asdw: bool = True,
+    allow_random_weights: bool = False,
+):
     """
     Initializes B2 UNet and loads checkpoint weights.
     By default (turn_off_asdw=True), ASDW refinement on Stage 0 and Stage 1 is bypassed
     with nn.Identity(), following the official deprecation of P3-C (Interim ASDW-OFF Candidate B).
+    If allow_random_weights=True, does not crash if checkpoint is missing on disk (useful for BS/VRAM benchmarking).
     """
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -233,29 +240,40 @@ def load_model_from_checkpoint(config_path: str, checkpoint_path: str, device: t
         pretrained=False,
     ).to(device)
 
-    if not os.path.exists(checkpoint_path):
-        print(f"[Warning] Checkpoint {checkpoint_path} not found.")
-        # Auto-fallback candidates for Colab/fresh environments
-        fallback_cand_b = "/content/results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth"
-        fallback_u1 = "/content/SAGE_LITE/results/diagnostics/phase6_u1_s2g/u1_s2g_weights.pth"
-        if os.path.exists(fallback_cand_b):
-            print(f"[Fallback] Loading base weights from Candidate B: {fallback_cand_b}")
-            ckpt_b = torch.load(fallback_cand_b, map_location=device, weights_only=False)
-            sd_b = ckpt_b["model_state_dict"] if "model_state_dict" in ckpt_b else ckpt_b
-            model.load_state_dict(sd_b, strict=False)
-            if use_s2_gate and model.decoder.s2_gate is not None and os.path.exists(fallback_u1):
-                print(f"[Fallback] Initializing S2-Gate Block 1 from {fallback_u1}")
-                u1_dict = torch.load(fallback_u1, map_location=device, weights_only=False)
-                u1_sd = u1_dict["s2_gate_state"] if "s2_gate_state" in u1_dict else u1_dict
-                model.decoder.s2_gate.warm_start_from_v1(u1_sd)
-            checkpoint_path = fallback_cand_b
-        else:
-            raise FileNotFoundError(f"Neither {checkpoint_path} nor fallback {fallback_cand_b} exists!")
+    # Resolve possible checkpoint paths across environments
+    resolved_ckpt = None
+    candidate_paths = [
+        checkpoint_path,
+        os.path.join(project_root, checkpoint_path) if checkpoint_path else None,
+        os.path.join(ss_root, checkpoint_path) if checkpoint_path else None,
+        "/content/" + checkpoint_path if checkpoint_path else None,
+        "/content/SAGE_LITE/" + checkpoint_path if checkpoint_path else None,
+        "/content/results/checkpoints/P3_C_D4_K2_H64_Phase5_SAGELR2e-4_best_model_b2_global.pth",
+        "/content/drive/MyDrive/checkpoints/" + os.path.basename(checkpoint_path) if checkpoint_path else None,
+        "/content/drive/MyDrive/" + os.path.basename(checkpoint_path) if checkpoint_path else None,
+    ]
+    for cand in candidate_paths:
+        if cand and os.path.exists(cand):
+            resolved_ckpt = cand
+            break
 
-    if os.path.exists(checkpoint_path) and "P3_C_D4_K2_H64" not in checkpoint_path:
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if resolved_ckpt is not None:
+        print(f"[Model] Loading weights from: {resolved_ckpt}")
+        ckpt = torch.load(resolved_ckpt, map_location=device, weights_only=False)
         state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
+
+        fallback_u1 = "/content/SAGE_LITE/results/diagnostics/phase6_u1_s2g/u1_s2g_weights.pth"
+        if "P3_C_D4_K2_H64" in resolved_ckpt and use_s2_gate and model.decoder.s2_gate is not None and os.path.exists(fallback_u1):
+            print(f"[Fallback] Initializing S2-Gate Block 1 from {fallback_u1}")
+            u1_dict = torch.load(fallback_u1, map_location=device, weights_only=False)
+            u1_sd = u1_dict["s2_gate_state"] if "s2_gate_state" in u1_dict else u1_dict
+            model.decoder.s2_gate.warm_start_from_v1(u1_sd)
+    else:
+        if allow_random_weights:
+            print(f"[Notice] Checkpoint not found at '{checkpoint_path}'. Initializing architecture directly (random weights) since allow_random_weights=True.")
+        else:
+            raise FileNotFoundError(f"Checkpoint '{checkpoint_path}' not found in any standard locations!")
 
     if turn_off_asdw and hasattr(model.backbone, "convnext"):
         for stage in model.backbone.convnext.stages[:2]:

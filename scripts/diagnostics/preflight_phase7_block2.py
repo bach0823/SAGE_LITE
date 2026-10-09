@@ -139,7 +139,9 @@ def run_preflight_block2(
 
     # 1. Load Base Model from Checkpoint
     print("\n[Step 1] Loading base model (D=4, K=2, S2-Gate Block 1 active)...")
-    model = load_model_from_checkpoint(config_path, checkpoint_path, device=device)
+    model = load_model_from_checkpoint(
+        config_path, checkpoint_path, device=device, allow_random_weights=True
+    )
     model.eval()
     print("  [OK] Base model loaded successfully.")
 
