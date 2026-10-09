@@ -687,6 +687,9 @@ def main(args):
         use_tangent_head = config.get('use_tangent_head', False) or (float(config.get('tangent_weight', 0.0)) > 0.0)
         use_s2_gate = config.get('use_s2_gate', False)
         s2_gate_kernel_size = int(config.get('s2_gate_kernel_size', 3))
+        use_s2_gate_block2 = config.get('use_s2_gate_block2', False)
+        s2_gate_block2_kernel_size = int(config.get('s2_gate_block2_kernel_size', 3))
+        s2_gate_block2_dilation = int(config.get('s2_gate_block2_dilation', 2))
         model = create_b2_unet(
             num_classes=1,
             img_size=img_size,
@@ -705,8 +708,11 @@ def main(args):
             use_tangent_head=use_tangent_head,
             use_s2_gate=use_s2_gate,
             s2_gate_kernel_size=s2_gate_kernel_size,
+            use_s2_gate_block2=use_s2_gate_block2,
+            s2_gate_block2_kernel_size=s2_gate_block2_kernel_size,
+            s2_gate_block2_dilation=s2_gate_block2_dilation,
         ).to(device)
-        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}, strip_pool={use_oriented_strip_pooling}, tangent_head={use_tangent_head}, use_s2_gate={use_s2_gate} (k={s2_gate_kernel_size})")
+        logger.info(f"Loaded B2 with {vit_depth} ViT blocks, full SAGE-Lite injection, p3_mode='{p3_mode}', use_plu_head={use_plu_head}, use_cgsr={use_cgsr}, use_point_rend={use_point_rend}, strip_pool={use_oriented_strip_pooling}, tangent_head={use_tangent_head}, use_s2_gate={use_s2_gate} (k={s2_gate_kernel_size}), use_s2_gate_block2={use_s2_gate_block2} (k={s2_gate_block2_kernel_size}, d={s2_gate_block2_dilation})")
 
     else:
         raise ValueError(f"Model {model_type} not implemented yet")
