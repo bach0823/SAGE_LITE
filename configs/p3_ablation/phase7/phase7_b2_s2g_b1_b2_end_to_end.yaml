@@ -15,11 +15,9 @@ lr: 1e-4
 sage_lr: 2e-4
 s2_gate_lr: 1e-3
 
-# Stage 2 Learning Rates: S2-Gate dùng chung base LR (1e-4) hoặc s2_gate_lr (1e-3)
+# Stage 2 Learning Rates: Theo chuẩn SAGE gốc chỉ có base_lr và shared_lr (1e-4), S2-Gate dùng chung base_lr
 stage2_base_lr: 1e-4
 stage2_shared_lr: 1e-4
-stage2_sage_lr: 1e-4
-stage2_s2_gate_lr: 1e-3
 
 output_dir: "results/phase7_combination/phase7_s2g_b1_b2_end_to_end"
 mask_suffix: ""
