@@ -31,7 +31,7 @@ for p in [project_root, os.path.join(project_root, ".."), os.getcwd(), "/content
     if os.path.isdir(p) and p not in sys.path:
         sys.path.insert(0, p)
 
-from sage.networks import S2GateModule
+from sage.networks import create_b2_unet, S2GateModule
 from tools.run_phase6_c_topology_diagnostic import (
     load_model_from_checkpoint,
     compute_topology_metrics,
@@ -137,13 +137,31 @@ def run_preflight_block2(
     total_vram_mb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2) if device.type == "cuda" else 0.0
     print(f"[Device] Target: {device} (VRAM: {total_vram_mb/1024:.2f} GB)" if device.type == "cuda" else f"[Device] Target: {device}")
 
-    # 1. Load Base Model from Checkpoint
-    print("\n[Step 1] Loading base model (D=4, K=2, S2-Gate Block 1 active)...")
-    model = load_model_from_checkpoint(
-        config_path, checkpoint_path, device=device, allow_random_weights=True
-    )
+    # 1. Instantiate Base Model (or load checkpoint if provided)
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"\n[Step 1] Loading base model from checkpoint: {checkpoint_path}...")
+        model = load_model_from_checkpoint(config_path, checkpoint_path, device=device)
+    else:
+        print("\n[Step 1] Instantiating Base Model architecture B2 directly (D=4, K=2, S2-Gate v2, pretrained=False)...")
+        model = create_b2_unet(
+            num_transformer_layers=4,
+            pretrained=False,
+            sage_config={
+                "top_k": 2,
+                "gating_type": "sigmoid",
+                "shared_expert_indices": [0, 1, 2, 3],
+                "router_hidden_dim": 64,
+                "load_balance_factor": 0.01,
+                "logit_modulation": True,
+                "expert_dropout": 0.1,
+                "fusion_type": "residual",
+                "residual_scale": 0.1,
+            },
+            use_s2_gate=True,
+            s2_gate_kernel_size=3,
+        ).to(device)
     model.eval()
-    print("  [OK] Base model loaded successfully.")
+    print("  [OK] Base model ready.")
 
     # 2. Instantiate S2-Gate Block 2
     print(f"\n[Step 2] Instantiating S2-Gate Block 2 (Kernel={kernel_size}, Dilation={dilation})...")
@@ -279,7 +297,7 @@ def run_preflight_block2(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 7 S2-Gate Block 2 Preflight Runner")
     parser.add_argument("--config", type=str, default="configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml")
-    parser.add_argument("--checkpoint", type=str, default="results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_global.pth")
+    parser.add_argument("--checkpoint", type=str, default="", help="Optional path to checkpoint. If empty, instantiates architecture directly.")
     parser.add_argument("--data-root", type=str, default="/content/dataset/Crack500")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--kernel-size", type=int, default=3)
@@ -290,10 +308,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Path fallbacks
-    for cand_ckpt in [args.checkpoint, os.path.join(project_root, args.checkpoint)]:
-        if os.path.exists(cand_ckpt):
-            args.checkpoint = cand_ckpt
-            break
+    if args.checkpoint:
+        for cand_ckpt in [args.checkpoint, os.path.join(project_root, args.checkpoint)]:
+            if os.path.exists(cand_ckpt):
+                args.checkpoint = cand_ckpt
+                break
     for cand_cfg in [args.config, os.path.join(project_root, args.config)]:
         if os.path.exists(cand_cfg):
             args.config = cand_cfg

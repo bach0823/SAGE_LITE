@@ -34,8 +34,7 @@ for p in [project_root, os.path.join(project_root, ".."), os.getcwd(), "/content
     if os.path.isdir(p) and p not in sys.path:
         sys.path.insert(0, p)
 
-from sage.networks import S2GateModule
-from tools.run_phase6_c_topology_diagnostic import load_model_from_checkpoint
+from sage.networks import create_b2_unet, S2GateModule
 from sage.utils.training_utils import set_seed
 
 
@@ -87,8 +86,6 @@ class Crack500TrainDataset(Dataset):
 
 
 def test_single_bs_block2(
-    config_path: str,
-    checkpoint_path: str,
     train_dataset,
     device,
     batch_size: int,
@@ -118,9 +115,23 @@ def test_single_bs_block2(
 
     model = None
     try:
-        model = load_model_from_checkpoint(
-            config_path, checkpoint_path, device=device, allow_random_weights=True
-        )
+        model = create_b2_unet(
+            num_transformer_layers=4,
+            pretrained=False,
+            sage_config={
+                "top_k": 2,
+                "gating_type": "sigmoid",
+                "shared_expert_indices": [0, 1, 2, 3],
+                "router_hidden_dim": 64,
+                "load_balance_factor": 0.01,
+                "logit_modulation": True,
+                "expert_dropout": 0.1,
+                "fusion_type": "residual",
+                "residual_scale": 0.1,
+            },
+            use_s2_gate=True,
+            s2_gate_kernel_size=3,
+        ).to(device)
         model.eval()
 
         s2_gate_b2 = S2GateModule(
@@ -225,8 +236,6 @@ def test_single_bs_block2(
 
 def main():
     parser = argparse.ArgumentParser(description="Sweep Batch Sizes for Phase 7 S2-Gate Block 2")
-    parser.add_argument("--config", type=str, default="configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml")
-    parser.add_argument("--checkpoint", type=str, default="results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_global.pth")
     parser.add_argument("--data-root", type=str, default="/content/dataset/Crack500")
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[16, 20, 24, 28, 32])
     parser.add_argument("--kernel-size", type=int, default=3)
@@ -236,15 +245,11 @@ def main():
     parser.add_argument("--warmup-batches", type=int, default=2)
     args = parser.parse_args()
 
-    # Path fallbacks
-    for cand_ckpt in [args.checkpoint, os.path.join(project_root, args.checkpoint)]:
-        if os.path.exists(cand_ckpt):
-            args.checkpoint = cand_ckpt
-            break
-    for cand_cfg in [args.config, os.path.join(project_root, args.config)]:
-        if os.path.exists(cand_cfg):
-            args.config = cand_cfg
-            break
+    # Dataset path fallback
+    if not os.path.isdir(args.data_root):
+        cand_data = os.path.join(project_root, "datasets", "Crack500_ready")
+        if os.path.isdir(cand_data):
+            args.data_root = cand_data
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_banner(f"PHASE 7 S2-GATE BLOCK 2 (3x3 d=2) BATCH SIZE SWEEP (GPU: {torch.cuda.get_device_name(0) if device.type=='cuda' else 'CPU'})")
@@ -257,8 +262,6 @@ def main():
     results = []
     for bs in args.batch_sizes:
         res = test_single_bs_block2(
-            config_path=args.config,
-            checkpoint_path=args.checkpoint,
             train_dataset=train_dataset,
             device=device,
             batch_size=bs,
