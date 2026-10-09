@@ -343,14 +343,14 @@ def train_s2_gate_block2(
 def main():
     parser = argparse.ArgumentParser(description="Phase 7: S2-Gate Block 2 Extension Runner")
     parser.add_argument("--config", type=str, default="configs/p3_ablation/phase6_full_s1/a1_s2g_end_to_end.yaml")
-    parser.add_argument("--checkpoint", type=str, default="results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_global.pth")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model_b2_phase6_s2g.pth")
     parser.add_argument("--data_root", type=str, default="datasets/Crack500_ready")
     parser.add_argument("--out_dir", type=str, default="results/diagnostics/phase7_s2_gate_block2")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--kernel_size", type=int, default=3, choices=[1, 3])
-    parser.add_argument("--dilation", type=int, default=1, choices=[1, 2, 4])
+    parser.add_argument("--dilation", type=int, default=2, choices=[1, 2, 4])
     parser.add_argument("--epochs", type=int, default=8)
-    parser.add_argument("--batch_size", type=int, default=14)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--top_k", type=int, default=None, choices=[1, 2, 3, 4, 6, 8], help="Override top_k capacity for all SAGE routers")
     parser.add_argument("--skip_train", action="store_true")
@@ -368,7 +368,17 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     # Resolve paths
-    for cand in [args.checkpoint, os.path.join(project_root, args.checkpoint), os.path.join("/content/SAGE_LITE", args.checkpoint)]:
+    cand_ckpts = [
+        args.checkpoint,
+        os.path.join(project_root, args.checkpoint),
+        "checkpoints/best_model_b2_phase6_s2g.pth",
+        os.path.join(project_root, "checkpoints/best_model_b2_phase6_s2g.pth"),
+        "/content/SAGE_LITE/checkpoints/best_model_b2_phase6_s2g.pth",
+        "results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_global.pth",
+        os.path.join(project_root, "results/phase6_combination/phase6_comb_a1_s2g_end_to_end/best_model_b2_global.pth"),
+        os.path.join("/content/SAGE_LITE", args.checkpoint),
+    ]
+    for cand in cand_ckpts:
         if os.path.exists(cand):
             args.checkpoint = cand
             break
