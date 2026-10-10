@@ -362,8 +362,13 @@ def main():
             sage_config=sage_cfg,
             p3_mode=config.get('p3_mode'),
             use_plu_head=use_plu_head,
+            use_s2_gate=config.get('use_s2_gate', False),
+            s2_gate_kernel_size=config.get('s2_gate_kernel_size', 3),
+            use_s2_gate_block2=config.get('use_s2_gate_block2', False),
+            s2_gate_block2_kernel_size=config.get('s2_gate_block2_kernel_size', 3),
+            s2_gate_block2_dilation=config.get('s2_gate_block2_dilation', 1),
         ).to(device)
-        print(f"Loaded B2 architecture with {vit_depth} ViT blocks, SAGE components, and use_plu_head={use_plu_head}")
+        print(f"Loaded B2 architecture with {vit_depth} ViT blocks, SAGE components, use_plu_head={use_plu_head}, s2_gate={config.get('use_s2_gate')}, s2_gate_b2={config.get('use_s2_gate_block2')}")
         if use_plu_head:
             from sage.networks.decoder_block import ProgressiveLearnedUpsamplingHead
             assert model.use_plu_head is True, "model.use_plu_head is not True!"
