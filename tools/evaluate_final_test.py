@@ -208,6 +208,11 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
             pretrained=False,
             sage_config=sage_cfg,
             p3_mode=p3_mode,
+            use_s2_gate=config.get("use_s2_gate", False),
+            s2_gate_kernel_size=config.get("s2_gate_kernel_size", 3),
+            use_s2_gate_block2=config.get("use_s2_gate_block2", False),
+            s2_gate_block2_kernel_size=config.get("s2_gate_block2_kernel_size", 3),
+            s2_gate_block2_dilation=config.get("s2_gate_block2_dilation", 1),
         ).to(device)
     elif model_type == "B1":
         model = create_b1_unet(num_transformer_layers=vit_depth, pretrained=False).to(device)
