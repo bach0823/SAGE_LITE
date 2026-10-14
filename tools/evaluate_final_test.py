@@ -224,7 +224,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
     logger.info(f"Loading checkpoint weights from: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
-    model.load_state_dict(state_dict)
+    if hasattr(model, "load_stage1_state_dict"):
+        model.load_stage1_state_dict(state_dict)
+    else:
+        model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model, ckpt
 

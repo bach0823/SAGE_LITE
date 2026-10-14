@@ -75,21 +75,25 @@ def compute_boundary_iou(pred: np.ndarray, target: np.ndarray, d: int = 2) -> fl
         return 1.0 if np.sum(pred) == 0 and np.sum(target) == 0 else 0.0
     return float(intersection / (union + 1e-5))
 
-def predict_full_image_direct(model, image, device, target_size=448):
+def predict_full_image_direct(model, image, device, target_size=448, pad_square=True):
     """
-    Direct full-image prediction without tiling (Protocol for DeepCrack baseline).
-    Full-image pipeline: dynamic Pad-to-Square -> Resize 448x448 -> model 1 pass -> logits.
+    Direct full-image prediction without tiling.
+    - If pad_square=True (DeepCrack): dynamic Pad-to-Square -> Resize target_size -> model 1 pass -> logits.
+    - If pad_square=False (Crack500 SOTA direct): Resize target_size direct -> model 1 pass -> logits -> resize back to original (H, W).
     """
     H, W = image.shape[:2]
-    target_dim = max(H, W, target_size)
-    pad_h = target_dim - H
-    pad_w = target_dim - W
-    top = pad_h // 2
-    bottom = pad_h - top
-    left = pad_w // 2
-    right = pad_w - left
-    padded = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-    resized = cv2.resize(padded, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+    if pad_square:
+        target_dim = max(H, W, target_size)
+        pad_h = target_dim - H
+        pad_w = target_dim - W
+        top = pad_h // 2
+        bottom = pad_h - top
+        left = pad_w // 2
+        right = pad_w - left
+        padded = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+        resized = cv2.resize(padded, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+    else:
+        resized = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
     
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
@@ -101,6 +105,10 @@ def predict_full_image_direct(model, image, device, target_size=448):
         with torch.amp.autocast('cuda'):
             logits = model(tensor)
         logits_np = logits.squeeze().cpu().numpy()
+
+    if not pad_square:
+        # Resize logits back to original image size (H, W) for exact ground-truth comparison
+        logits_np = cv2.resize(logits_np, (W, H), interpolation=cv2.INTER_LINEAR)
         
     return logits_np
 
@@ -131,11 +139,20 @@ def predict_full_image_tiling_setting_a(model, image, device, tile_size=448, bat
             
     pred_logits = np.zeros((pH, pW), dtype=np.float32)
     
+    is_gtx16xx = False
+    if device.type == 'cuda':
+        dname = torch.cuda.get_device_name(0)
+        if '1650' in dname or '1660' in dname:
+            is_gtx16xx = True
+
     for i in range(0, len(patches), batch_size):
         batch = torch.stack(patches[i:i+batch_size]).to(device, non_blocking=True)
         with torch.no_grad():
-            with torch.amp.autocast('cuda'):
+            if is_gtx16xx:
                 logits = model(batch)
+            else:
+                with torch.amp.autocast('cuda'):
+                    logits = model(batch)
             logits_np = logits.squeeze(1).cpu().numpy()
             
         for j, logit in enumerate(logits_np):
@@ -256,21 +273,28 @@ def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, bl
         target = (mask > 0).astype(np.uint8)
         
         if protocol == 'direct':
-            # Full-image DeepCrack: dynamic Pad-to-Square -> Resize 448x448 -> model
-            logits_np = predict_full_image_direct(model, img, device, target_size=tile_size)
-            pred = (logits_np > 0.0).astype(np.uint8)
-            
-            # Ground truth target: dynamic Pad-to-Square -> Resize 448x448
-            H, W = target.shape[:2]
-            target_dim = max(H, W, tile_size)
-            pad_h = target_dim - H
-            pad_w = target_dim - W
-            top = pad_h // 2
-            bottom = pad_h - top
-            left = pad_w // 2
-            right = pad_w - left
-            padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-            target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+            is_deepcrack = any('deepcrack' in str(p).lower() for p in [img_p, mask_p])
+            if is_deepcrack:
+                # Full-image DeepCrack: dynamic Pad-to-Square -> Resize 448x448 -> model
+                logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=True)
+                pred = (logits_np > 0.0).astype(np.uint8)
+                
+                # Ground truth target: dynamic Pad-to-Square -> Resize 448x448
+                H, W = target.shape[:2]
+                target_dim = max(H, W, tile_size)
+                pad_h = target_dim - H
+                pad_w = target_dim - W
+                top = pad_h // 2
+                bottom = pad_h - top
+                left = pad_w // 2
+                right = pad_w - left
+                padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+                target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+            else:
+                # Crack500 SOTA direct protocol: Resize 640x360 -> 448x448 -> model -> resize logits back to 640x360
+                logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=False)
+                pred = (logits_np > 0.0).astype(np.uint8)
+                # target remains in original resolution (640, 360) - exact 100% evaluation without padding!
             
         elif protocol == 'setting_b':
             blended = predict_full_image_tiling_setting_b(model, img, device, tile_size=tile_size, stride=tile_size // 2, blend_mode=blend_mode)

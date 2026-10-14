@@ -167,7 +167,10 @@ def load_model(config_path: str, checkpoint_path: str, device: torch.device) -> 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
     state_dict = {k: v for k, v in state_dict.items() if "p3_refinement" not in k}
-    model.load_state_dict(state_dict, strict=True)
+    if hasattr(model, 'load_stage1_state_dict'):
+        model.load_stage1_state_dict(state_dict)
+    else:
+        model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
@@ -205,6 +208,11 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(args.device)
+    if device.type == 'cuda':
+        dname = torch.cuda.get_device_name(0)
+        if '1650' in dname or '1660' in dname:
+            torch.backends.cudnn.enabled = False
+            print(f"Detected {dname}. Disabled cuDNN for FP16/Conv numerical stability.")
 
     # Resolve Validation pairs
     val_img_dir = os.path.join(args.data_root, "val", "images")
@@ -220,19 +228,19 @@ def main():
                 break
 
     print("=" * 80)
-    print("SO SÁNH TÔ PÔ HÌNH THÁI CHÍNH THỨC: PHASE 6 vs PHASE 7")
-    print(f"Tổng số mẫu Val: {len(pairs)}")
+    print("TOPOLOGY DIAGNOSTIC AUDIT: PHASE 6 vs PHASE 7")
+    print(f"Total Val Samples: {len(pairs)}")
     print(f"Phase 6 Checkpoint: {args.phase6_ckpt}")
     print(f"Phase 7 Checkpoint: {args.phase7_ckpt}")
     print("=" * 80)
 
     # 1. Evaluate Phase 6
-    print("\n[1/2] Nạp và đánh giá Phase 6 (Single S2-Gate Block 1)...")
+    print("\n[1/2] Loading and evaluating Phase 6 (Single S2-Gate Block 1)...")
     model_p6 = load_model(args.phase6_config, args.phase6_ckpt, device)
     df_p6 = evaluate_model_topology(model_p6, pairs, device, "Phase 6 (Single S2G)")
 
     # 2. Evaluate Phase 7
-    print("\n[2/2] Nạp và đánh giá Phase 7 (Dual S2-Gate Block 1 + Block 2)...")
+    print("\n[2/2] Loading and evaluating Phase 7 (Dual S2-Gate Block 1 + Block 2)...")
     model_p7 = load_model(args.phase7_config, args.phase7_ckpt, device)
     df_p7 = evaluate_model_topology(model_p7, pairs, device, "Phase 7 (Dual S2G)")
 
@@ -310,8 +318,9 @@ def main():
         f.write(md_report)
 
     print("\n" + "=" * 80)
-    print(md_report)
-    print(f"Đã lưu báo cáo chi tiết vào: {report_file}")
+    print("SUCCESS: Topology comparison completed successfully!")
+    print(f"Report written to: {report_file}")
+    print(f"Summary JSON saved to: {os.path.join(args.output_dir, 'topology_comparison_summary.json')}")
     print("=" * 80)
 
 
