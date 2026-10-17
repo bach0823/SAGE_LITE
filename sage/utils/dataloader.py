@@ -32,28 +32,17 @@ def pad_to_square(image: np.ndarray, mask: np.ndarray, min_size: int = 448):
     return padded_img, padded_mask
 
 
-def get_transformations(img_size, crop_mode='resize'):
+def get_transformations(img_size):
     """
-    Data augmentation transformations for training and validation.
-    Supports both SOTA 'resize' (direct scaling) and 'random' (crop patch).
+    SOTA Resize Protocol: Direct resize to (img_size, img_size) with nearest mask interpolation.
+    Zero padding, zero artificial boundary reflection.
     """
-    if crop_mode == 'random':
-        base_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101),
-            A.RandomCrop(width=img_size, height=img_size)
-        ]
-        val_crop = [
-            A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_REFLECT_101),
-            A.CenterCrop(height=img_size, width=img_size),
-        ]
-    else:
-        # SOTA Resize protocol: direct resize to (img_size, img_size) with nearest mask interpolation
-        base_crop = [
-            A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
-        ]
-        val_crop = [
-            A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
-        ]
+    base_crop = [
+        A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
+    ]
+    val_crop = [
+        A.Resize(img_size, img_size, mask_interpolation=cv2.INTER_NEAREST)
+    ]
 
     aug_list = [
         A.HorizontalFlip(p=0.5),
@@ -147,11 +136,10 @@ class ConfigurableMedicalDataset(Dataset):
         print(f"[ConfigurableDataset] Loaded {split.upper()}: {len(self.samples)} samples from {img_dir}")
 
         # 4. Set Transforms
-        self.crop_mode = self.config.get('crop_mode', 'resize')
         if transform:
             self.transforms = transform
         else:
-            train_t, val_t = get_transformations(image_size, crop_mode=self.crop_mode)
+            train_t, val_t = get_transformations(image_size)
             self.transforms = train_t if split == 'train' else val_t
 
     def __len__(self):
@@ -164,9 +152,9 @@ class ConfigurableMedicalDataset(Dataset):
         mask = cv2.imread(sample['label'], cv2.IMREAD_GRAYSCALE)
         mask = (mask > 0).astype(np.uint8)
 
-        # For DeepCrack with resize: pad to square first to preserve aspect ratio.
-        # For Crack500 (SOTA resize protocol): resize directly without black padding borders.
-        if self.crop_mode == 'resize' and not self.is_crack500:
+        # For DeepCrack: pad to square first to preserve aspect ratio.
+        # For Crack500: direct resize 640x360 -> 448x448 (no black padding borders).
+        if not self.is_crack500:
             image, mask = pad_to_square(image, mask, self.image_size)
 
         # Apply transforms (Augmentation + Normalize + Tensor)
