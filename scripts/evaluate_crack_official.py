@@ -224,29 +224,14 @@ def predict_full_image_tiling_setting_b(model, image, device, tile_size=448, str
 # Alias for backward compatibility
 predict_full_image_tiling = predict_full_image_tiling_setting_a
 
-def resolve_protocol(config, cli_protocol=None):
+def resolve_protocol(config=None, cli_protocol=None):
     """
     Resolves evaluation protocol:
-    - 'direct': DeepCrack (no tiling, full image)
-    - 'setting_a': Crack500 Setting A (non-overlap 448x448)
-    - 'setting_b': Crack500 Setting B (overlap 50%, stride=224, average blending)
+    Standardized exclusively to SOTA 'direct' (1-pass full-image prediction).
     """
-    if cli_protocol and cli_protocol not in ('auto', 'all'):
-        return cli_protocol
-        
-    if 'eval_protocol' in config:
-        return config['eval_protocol']
+    return 'direct'
 
-    dataset_name = str(config.get('dataset', '')).lower()
-    root_dir = str(config.get('root_dir', '')).lower()
-    crop_mode = str(config.get('crop_mode', '')).lower()
-    
-    if 'deepcrack' in dataset_name or 'deepcrack' in root_dir or crop_mode == 'resize':
-        return 'direct'
-    else:
-        return 'setting_a'
-
-def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, blend_mode='probs', criterion=None, diagnostic=False, verbose=True):
+def evaluate_split(model, pairs, device, protocol='direct', tile_size=448, criterion=None, diagnostic=False, verbose=True):
     metrics = {
         'precision': [], 'recall': [], 'dice': [], 'iou': [],
         'crack_iou': []
@@ -272,41 +257,28 @@ def evaluate_split(model, pairs, device, protocol='setting_a', tile_size=448, bl
         if mask is None: continue
         target = (mask > 0).astype(np.uint8)
         
-        if protocol == 'direct':
-            is_deepcrack = any('deepcrack' in str(p).lower() for p in [img_p, mask_p])
-            if is_deepcrack:
-                # Full-image DeepCrack: dynamic Pad-to-Square -> Resize 448x448 -> model
-                logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=True)
-                pred = (logits_np > 0.0).astype(np.uint8)
-                
-                # Ground truth target: dynamic Pad-to-Square -> Resize 448x448
-                H, W = target.shape[:2]
-                target_dim = max(H, W, tile_size)
-                pad_h = target_dim - H
-                pad_w = target_dim - W
-                top = pad_h // 2
-                bottom = pad_h - top
-                left = pad_w // 2
-                right = pad_w - left
-                padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-                target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
-            else:
-                # Crack500 SOTA direct protocol: Resize 640x360 -> 448x448 -> model -> resize logits back to 640x360
-                logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=False)
-                pred = (logits_np > 0.0).astype(np.uint8)
-                # target remains in original resolution (640, 360) - exact 100% evaluation without padding!
-            
-        elif protocol == 'setting_b':
-            blended = predict_full_image_tiling_setting_b(model, img, device, tile_size=tile_size, stride=tile_size // 2, blend_mode=blend_mode)
-            if blend_mode == 'probs':
-                pred = (blended > 0.5).astype(np.uint8)
-                logits_np = blended  # for loss computation approximation
-            else:
-                pred = (blended > 0.0).astype(np.uint8)
-                logits_np = blended
-        else: # setting_a
-            logits_np = predict_full_image_tiling_setting_a(model, img, device, tile_size=tile_size)
+        is_deepcrack = any('deepcrack' in str(p).lower() for p in [img_p, mask_p])
+        if is_deepcrack:
+            # Full-image DeepCrack: dynamic Pad-to-Square -> Resize 448x448 -> model
+            logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=True)
             pred = (logits_np > 0.0).astype(np.uint8)
+            
+            # Ground truth target: dynamic Pad-to-Square -> Resize 448x448
+            H, W = target.shape[:2]
+            target_dim = max(H, W, tile_size)
+            pad_h = target_dim - H
+            pad_w = target_dim - W
+            top = pad_h // 2
+            bottom = pad_h - top
+            left = pad_w // 2
+            right = pad_w - left
+            padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+            target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+        else:
+            # Crack500 SOTA direct protocol: Resize 640x360 -> 448x448 -> model -> resize logits back to 640x360
+            logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=False)
+            pred = (logits_np > 0.0).astype(np.uint8)
+            # target remains in original resolution (640, 360) - exact 100% evaluation without padding!
             
         if criterion is not None:
             log_tensor = torch.from_numpy(logits_np).unsqueeze(0).unsqueeze(0).to(device)
@@ -350,11 +322,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
     parser.add_argument('--checkpoint', type=str, required=True)
-    parser.add_argument('--protocol', type=str, default='auto',
-                        choices=['auto', 'direct', 'setting_a', 'setting_b', 'all'],
-                        help="Eval protocol: 'direct' (DeepCrack full-image), 'setting_a' (Crack500 non-overlap), 'setting_b' (Crack500 50% overlap), 'all' (runs both Setting A & B)")
-    parser.add_argument('--blend-mode', type=str, default='probs', choices=['logits', 'probs'],
-                        help="Blend method for Setting B: 'probs' (average probabilities -> threshold 0.5) or 'logits' (average logits -> threshold 0)")
+    parser.add_argument('--protocol', type=str, default='direct',
+                        choices=['direct'],
+                        help="Eval protocol: 'direct' (1-pass full-image prediction)")
     parser.add_argument('--diagnostic', action='store_true',
                         help="Compute diagnostic metrics at best checkpoint (Boundary IoU, HD95)")
     parser.add_argument('--split', type=str, default='val', choices=['val', 'test', 'all'],
@@ -411,17 +381,7 @@ def main():
     model.eval()
         
     tile_size = config.get('img_size', 448)
-    
-    if args.protocol == 'all':
-        default_proto = resolve_protocol(config)
-        if default_proto == 'direct':
-            protocols_to_run = ['direct']
-        else:
-            protocols_to_run = ['setting_a', 'setting_b']
-    elif args.protocol != 'auto':
-        protocols_to_run = [args.protocol]
-    else:
-        protocols_to_run = [resolve_protocol(config)]
+    protocols_to_run = ['direct']
 
     criterion = CrackBinaryLoss()
 
@@ -429,12 +389,7 @@ def main():
         print("\n" + "=" * 60)
         print(f"EVALUATION PROTOCOL: {protocol.upper()}")
         print("=" * 60)
-        if protocol == 'direct':
-            print("  Mode: Direct full-image prediction (DeepCrack baseline: dynamic Pad-to-Square -> Resize 448x448).")
-        elif protocol == 'setting_a':
-            print(f"  Mode: Crack500 Setting A (non-overlapping tiling, tile_size={tile_size}x{tile_size}).")
-        elif protocol == 'setting_b':
-            print(f"  Mode: Crack500 Setting B (50% overlapping tiling, tile_size={tile_size}x{tile_size}, stride={tile_size // 2}, blend_mode={args.blend_mode}).")
+        print("  Mode: Direct full-image prediction (DeepCrack: dynamic Pad-to-Square -> Resize 448x448; Crack500: direct Resize 640x360 -> 448x448).")
         
         splits_to_run = ['val', 'test'] if args.split == 'all' else [args.split]
         for split in splits_to_run:
@@ -445,7 +400,7 @@ def main():
             print(f"\n--- Evaluating [{protocol}] on {split.upper()} Set ({len(pairs)} images) ---")
             res = evaluate_split(
                 model, pairs, device, protocol=protocol, tile_size=tile_size,
-                blend_mode=args.blend_mode, criterion=criterion, diagnostic=args.diagnostic
+                criterion=criterion, diagnostic=args.diagnostic
             )
             
             print(f"{split.upper()} Loss:               {res.get('loss', 0.0):.4f}")
