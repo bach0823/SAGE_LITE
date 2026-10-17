@@ -11,8 +11,6 @@ output_dir: "/content/drive/MyDrive/crack_seg/B0_DeepCrack_Run1"
 mask_suffix: ""
 
 root_dir: "/content/dataset/DeepCrack"
-crop_mode: "resize"
-smart_filter: false
 
 train:
   images: "train/images"

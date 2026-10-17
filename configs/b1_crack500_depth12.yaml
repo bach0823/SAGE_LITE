@@ -10,8 +10,6 @@ patience: 6
 lr: 1e-4
 output_dir: "/content/drive/MyDrive/crack_seg/B1_Crack500_Depth12"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 root_dir: "/content/dataset/Crack500"
 
