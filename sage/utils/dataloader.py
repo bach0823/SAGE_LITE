@@ -34,7 +34,7 @@ def pad_to_square(image: np.ndarray, mask: np.ndarray, min_size: int = 448):
 
 def get_transformations(img_size):
     """
-    SOTA Resize Protocol: Direct resize to (img_size, img_size) with nearest mask interpolation.
+    Direct resize: scales input to (img_size, img_size) with nearest mask interpolation.
     Zero padding, zero artificial boundary reflection.
     """
     base_crop = [
@@ -63,7 +63,7 @@ def get_transformations(img_size):
     return train_transform, val_transforms
 
 
-class ConfigurableMedicalDataset(Dataset):
+class ConfigurableCrackDataset(Dataset):
     """
     Canonical Dataset Loader reading from a YAML configuration file.
     Supports pre-split datasets (train/val/test in separate folders).
@@ -133,7 +133,7 @@ class ConfigurableMedicalDataset(Dataset):
 
         # Canonical deterministic ordering
         self.samples.sort(key=lambda s: os.path.normpath(s['image']).replace('\\', '/'))
-        print(f"[ConfigurableDataset] Loaded {split.upper()}: {len(self.samples)} samples from {img_dir}")
+        print(f"[ConfigurableCrackDataset] Loaded {split.upper()}: {len(self.samples)} samples from {img_dir}")
 
         # 4. Set Transforms
         if transform:
@@ -173,4 +173,8 @@ class ConfigurableMedicalDataset(Dataset):
 
 def get_dataset_from_config(config_path, split='train', image_size=448):
     """Helper to create dataset directly from yaml path"""
-    return ConfigurableMedicalDataset(config_path, split=split, image_size=image_size)
+    return ConfigurableCrackDataset(config_path, split=split, image_size=image_size)
+
+
+# Backward-compatibility alias
+ConfigurableMedicalDataset = ConfigurableCrackDataset

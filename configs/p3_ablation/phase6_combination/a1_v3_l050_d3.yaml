@@ -23,8 +23,6 @@ stage2_p3_lr: 1e-4
 stage2_sage_lr: 1e-4
 output_dir: "results/runs/phase6_comb_a1_v3"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Objective Probe: SoftBIoU
 boundary_iou_weight: 0.50

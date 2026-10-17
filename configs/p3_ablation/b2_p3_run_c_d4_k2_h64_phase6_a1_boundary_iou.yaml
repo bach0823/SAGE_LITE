@@ -36,8 +36,6 @@ stage2_shared_lr: 1e-4
 stage2_p3_lr: 1e-4
 output_dir: "/content/runs/P3_C_Phase6_A1_BoundaryIoU_D4_K2_H64"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Phase 6-A.1 Objective Probe Hyperparameters (Locked Ex-Ante)
 boundary_iou_weight: 0.5

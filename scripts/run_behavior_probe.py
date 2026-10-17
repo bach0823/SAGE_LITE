@@ -1,7 +1,7 @@
 """
 run_behavior_probe.py
 =====================
-Behavior probe for ConfigurableMedicalDataset (Crack500 smart-filter mode).
+Behavior probe for ConfigurableCrackDataset (Crack500 smart-filter mode).
 
 Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
 
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from sage.utils.dataloader import ConfigurableMedicalDataset
+from sage.utils.dataloader import ConfigurableCrackDataset
 
 
 # ──────────────────────────────────────────────────────────────
@@ -58,14 +58,14 @@ def main():
 
     print(f"\n1. Loading dataset from {args.config} [{args.split}] ...")
     try:
-        ds = ConfigurableMedicalDataset(args.config, split=args.split,
+        ds = ConfigurableCrackDataset(args.config, split=args.split,
                                         image_size=IMAGE_SIZE)
     except Exception as e:
         print(f"ERROR loading dataset: {e}")
         sys.exit(1)
 
     print(f"   Dataset size  : {len(ds)} samples")
-    print(f"   Smart filter  : {getattr(ds, 'use_smart_filter', False)}")
+    print(f"   Pipeline mode : direct resize to ({IMAGE_SIZE}, {IMAGE_SIZE})")
 
     random.seed(SEED)
     np.random.seed(SEED)

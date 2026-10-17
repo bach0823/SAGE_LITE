@@ -2,7 +2,7 @@ model: B2
 num_transformer_layers: 4
 seed: 42
 img_size: 448
-batch_size: 14
+batch_size: 16
 num_workers: 2
 epochs: 35
 stage1_epochs: 17
@@ -22,13 +22,12 @@ stage2_sage_lr: 1e-4
 
 output_dir: "results/phase6_combination/phase6_a1_s2g_end_to_end"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
-# Architecture: Bilinear Head + Native S2-Gate v2 (Conv3x3) tích hợp ngay từ đầu
+# Architecture: Bilinear Head + Native S2-Gate v2 (Conv3x3) tích hợp ngay từ đầu (Block 1 only)
 use_plu_head: false
 use_s2_gate: true
 s2_gate_kernel_size: 3
+use_s2_gate_block2: false
 
 # Objective Component: SoftBIoU (lambda=0.50, d=2)
 boundary_iou_weight: 0.50

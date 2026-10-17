@@ -236,9 +236,7 @@ def test_real_dataset_augmentation_leakage():
 
     dataset_cfg = {
         'root_dir': DATASET_ROOT,
-        'train': {'images': 'train/images', 'masks': 'train/masks'},
-        'smart_filter': True,
-        'crop_mode': 'random'
+        'train': {'images': 'train/images', 'masks': 'train/masks'}
     }
 
     random.seed(42)

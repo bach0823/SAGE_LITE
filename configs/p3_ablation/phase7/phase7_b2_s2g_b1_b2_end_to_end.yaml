@@ -21,8 +21,6 @@ stage2_shared_lr: 1e-4
 
 output_dir: "results/phase7_combination/phase7_s2g_b1_b2_end_to_end"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Architecture: Bilinear Head + Native S2-Gate Block 1 (Conv3x3) + S2-Gate Block 2 (Conv3x3, Dilation 2)
 use_plu_head: false

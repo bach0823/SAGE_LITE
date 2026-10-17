@@ -1,7 +1,7 @@
 """
 run_dataloader_smoke_test.py
 ============================
-Smoke test for ConfigurableMedicalDataset (Crack500 smart-filter mode).
+Smoke test for ConfigurableCrackDataset (Crack500 smart-filter mode).
 
 Tests the REAL __getitem__ in sage/utils/dataloader.py — NO monkey-patching.
 
@@ -24,7 +24,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from sage.utils.dataloader import ConfigurableMedicalDataset
+from sage.utils.dataloader import ConfigurableCrackDataset
 
 
 # ──────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ def run_smoke(num_workers: int, config_path: str = CONFIG_PATH, split: str = "tr
         return False
 
     try:
-        ds = ConfigurableMedicalDataset(config_path, split=split,
+        ds = ConfigurableCrackDataset(config_path, split=split,
                                         image_size=IMAGE_SIZE)
     except Exception as e:
         print(f"ERROR loading dataset: {e}")
@@ -64,7 +64,7 @@ def run_smoke(num_workers: int, config_path: str = CONFIG_PATH, split: str = "tr
 
     print(f"Dataset size    : {len(ds)} samples")
     print(f"Expected batches: {expected_batches} (target test: {target_batches})")
-    print(f"Smart filter    : {getattr(ds, 'use_smart_filter', False)}")
+    print(f"Pipeline mode   : direct resize to ({IMAGE_SIZE}, {IMAGE_SIZE})")
 
     g = torch.Generator()
     g.manual_seed(SEED)

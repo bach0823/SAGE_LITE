@@ -23,8 +23,6 @@ stage2_s2_gate_lr: 1e-4
 
 output_dir: "results/phase7_vit_depth8_k2"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Architecture: Bilinear Head + Native S2-Gate v2 (Conv3x3) tích hợp ngay từ đầu
 use_plu_head: false

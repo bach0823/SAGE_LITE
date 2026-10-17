@@ -38,7 +38,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from sage.networks import create_b2_unet
-from scripts.evaluate_crack_official import predict_full_image_tiling_setting_a
+from scripts.evaluate_crack_official import predict_full_image_direct
 from sage.utils.advanced_metrics import calculate_hd95_bf1
 
 
@@ -184,7 +184,7 @@ def evaluate_model_topology(model: nn.Module, pairs: List[Tuple[str, str, str]],
         target = (mask > 0).astype(np.uint8)
 
         with torch.no_grad():
-            pred_logits = predict_full_image_tiling_setting_a(model, img_rgb, device, tile_size=448)
+            pred_logits = predict_full_image_direct(model, img_rgb, device, target_size=448, pad_square=False)
         pred_bin = (pred_logits > 0.0).astype(np.uint8)
 
         m = compute_sample_topology(pred_bin, target)

@@ -20,8 +20,6 @@ stage2_p3_lr: 1e-4
 stage2_sage_lr: 1e-4
 output_dir: "results/phase6_combination/phase6_a1_full_s1_l075"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Head architecture: Bilinear standard
 use_plu_head: false

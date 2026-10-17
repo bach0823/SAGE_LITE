@@ -41,8 +41,6 @@ stage2_shared_lr: 1e-4
 stage2_p3_lr: 1e-4
 output_dir: "/content/runs/P3_C_Phase6_A2_Pure_PLU_D4_K2_H64"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Representation Probe Flag
 use_plu_head: true

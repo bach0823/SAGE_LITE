@@ -7,7 +7,7 @@
 - `model_utils.py`: `count_parameters`, `save_checkpoint`, `load_checkpoint`, `load_shared_expert_weights`.
 - `visualization.py`: `visualize_predictions`, `visualize_expert_usage`, `save_training_plots`.
 - `evaluation.py`: `evaluate_model`, `calculate_metrics_batch`, `generate_evaluation_report`.
-- `dataloader.py`: `ConfigurableMedicalDataset`, `get_transformations` (import trực tiếp từ file khi cần).
+- `dataloader.py`: `ConfigurableCrackDataset`, `get_transformations` (import trực tiếp từ file khi cần).
 
 ## Example
 ```python

@@ -35,8 +35,6 @@ stage2_p3_lr: 1e-4
 stage2_sage_lr: 1e-4
 output_dir: "results/phase6_combination/phase6_comb_full35_a1_b1"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 # Representation Component (Bilinear Canonical Head)
 use_plu_head: false

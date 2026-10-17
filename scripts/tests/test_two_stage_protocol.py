@@ -263,8 +263,6 @@ def test_full_two_stage_training_flow():
             "stage2_base_lr": 1e-4,
             "stage2_shared_lr": 1e-4,
             "output_dir": output_dir,
-            "smart_filter": False,
-            "crop_mode": "none",
             "root_dir": tmp_dir,
             "train": {"images": "train/images", "masks": "train/masks"},
             "val": {"images": "val/images", "masks": "val/masks"},

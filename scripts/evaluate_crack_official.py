@@ -79,7 +79,7 @@ def predict_full_image_direct(model, image, device, target_size=448, pad_square=
     """
     Direct full-image prediction without tiling.
     - If pad_square=True (DeepCrack): dynamic Pad-to-Square -> Resize target_size -> model 1 pass -> logits.
-    - If pad_square=False (Crack500 SOTA direct): Resize target_size direct -> model 1 pass -> logits -> resize back to original (H, W).
+    - If pad_square=False (Crack500 direct resize): Resize target_size direct -> model 1 pass -> logits -> resize back to original (H, W).
     """
     H, W = image.shape[:2]
     if pad_square:
@@ -101,8 +101,17 @@ def predict_full_image_direct(model, image, device, target_size=448, pad_square=
     tensor = torch.from_numpy(resized).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
     tensor = (tensor - mean) / std
     
+    is_gtx16xx = False
+    if device.type == 'cuda':
+        dname = torch.cuda.get_device_name(device)
+        if '1650' in dname or '1660' in dname:
+            is_gtx16xx = True
+
     with torch.no_grad():
-        with torch.amp.autocast('cuda'):
+        if device.type == 'cuda' and not is_gtx16xx:
+            with torch.amp.autocast('cuda'):
+                logits = model(tensor)
+        else:
             logits = model(tensor)
         logits_np = logits.squeeze().cpu().numpy()
 
@@ -227,7 +236,7 @@ predict_full_image_tiling = predict_full_image_tiling_setting_a
 def resolve_protocol(config=None, cli_protocol=None):
     """
     Resolves evaluation protocol:
-    Standardized exclusively to SOTA 'direct' (1-pass full-image prediction).
+    Standardized to full-image direct evaluation (1-pass prediction).
     """
     return 'direct'
 
@@ -275,7 +284,7 @@ def evaluate_split(model, pairs, device, protocol='direct', tile_size=448, crite
             padded_target = cv2.copyMakeBorder(target, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
             target = cv2.resize(padded_target, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
         else:
-            # Crack500 SOTA direct protocol: Resize 640x360 -> 448x448 -> model -> resize logits back to 640x360
+            # Crack500 direct resize: Resize 640x360 -> 448x448 -> model -> resize logits back to 640x360
             logits_np = predict_full_image_direct(model, img, device, target_size=tile_size, pad_square=False)
             pred = (logits_np > 0.0).astype(np.uint8)
             # target remains in original resolution (640, 360) - exact 100% evaluation without padding!
@@ -331,10 +340,15 @@ def main():
                         help="Dataset split to evaluate (default: val to keep test set sealed)")
     parser.add_argument('--output_json', '--output-json', type=str, default=None,
                         help="Path to save evaluation metrics as JSON")
+    parser.add_argument('--data-root', '--data_root', type=str, default=None,
+                        help="Override dataset root directory")
     args = parser.parse_args()
     
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+
+    if args.data_root:
+        config['root_dir'] = args.data_root
         
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")

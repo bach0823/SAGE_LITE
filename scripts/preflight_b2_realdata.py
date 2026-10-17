@@ -3,12 +3,12 @@ B2 (Full SAGE-Lite) Real-Data Runtime Preflight & Benchmark Script for Crack500
 
 Purpose:
 Verify that batch size 12 runs safely, stably, and without OOM under the ACTUAL
-Crack500 dataset pipeline (ConfigurableMedicalDataset, Albumentations transforms,
+Crack500 dataset pipeline (ConfigurableCrackDataset, Albumentations transforms,
 smart filter fg_pixels >= 20, random 448x448 crops) rather than synthetic tensors.
 
 Verifications:
 1. Real Data Pipeline Integration:
-   - Uses exact ConfigurableMedicalDataset and DataLoader settings from Crack500 train.
+   - Uses exact ConfigurableCrackDataset and DataLoader settings from Crack500 train.
    - Preserves all canonical preprocessing and data augmentations.
 2. Exact B2 Architecture & Optimizer:
    - B2 ConvNeXtV2-ViT Hybrid UNet (Depth 12, 16 injected routers, Top-K=4).
@@ -109,10 +109,10 @@ def run_realdata_preflight(
     img_size = config.get('img_size', 448)
     print_banner(f"LOADING REAL CRACK500 DATASET (Image Size: {img_size}x{img_size})")
 
-    # Use exact dataset pipeline from config (ConfigurableMedicalDataset)
+    # Use exact dataset pipeline from config (ConfigurableCrackDataset)
     train_dataset = get_dataset_from_config(config, split='train', image_size=img_size)
     print(f"[Dataset] Train samples count: {len(train_dataset)}")
-    print(f"[Dataset] Preprocessing mode: crop_mode='{getattr(train_dataset, 'crop_mode', 'random')}', smart_filter={getattr(train_dataset, 'use_smart_filter', True)}")
+    print(f"[Dataset] Preprocessing mode: direct resize to ({img_size}, {img_size})")
 
     g = torch.Generator()
     g.manual_seed(seed)

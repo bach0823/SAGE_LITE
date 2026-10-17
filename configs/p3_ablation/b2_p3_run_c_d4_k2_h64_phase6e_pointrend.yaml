@@ -42,8 +42,6 @@ stage2_shared_lr: 1e-4
 stage2_p3_lr: 1e-4
 output_dir: "/content/runs/Phase6E_PointRend"
 mask_suffix: ""
-smart_filter: true
-crop_mode: "random"
 
 sage_config:
   top_k: 2

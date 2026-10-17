@@ -571,8 +571,6 @@ def generate_combined_config(
         "stage2_sage_lr": 1e-4,
         "output_dir": output_run_dir,
         "mask_suffix": "",
-        "smart_filter": True,
-        "crop_mode": "random",
         "ab_bpl_weight": float(lambda_b1),
         "ab_bpl_dilation": int(r_b1),
         "boundary_iou_weight": float(lambda_a1),

@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from sage.utils.dataloader import ConfigurableMedicalDataset, pad_to_square
+from sage.utils.dataloader import ConfigurableCrackDataset, pad_to_square
 
 
 def test_split(dataset, split_name: str, max_samples: int = 50, expected_shape=(448, 448)):
@@ -89,8 +89,6 @@ def main():
         tmp_c500 = {
             'model': 'B0',
             'root_dir': c500_local,
-            'crop_mode': 'random',
-            'smart_filter': True,
             'img_size': 448,
             'mask_suffix': '',
             'train': {'images': 'traincrop', 'masks': 'traincrop'},
@@ -101,23 +99,23 @@ def main():
         with open(tmp_path_c500, 'w') as f:
             yaml.dump(tmp_c500, f)
         try:
-            ds_c500_train = ConfigurableMedicalDataset(tmp_path_c500, split='train', image_size=448)
+            ds_c500_train = ConfigurableCrackDataset(tmp_path_c500, split='train', image_size=448)
             all_pass &= test_split(ds_c500_train, "Crack500 Train (Smart Filter)", max_samples=50, expected_shape=(448, 448))
-            ds_c500_val = ConfigurableMedicalDataset(tmp_path_c500, split='val', image_size=448)
+            ds_c500_val = ConfigurableCrackDataset(tmp_path_c500, split='val', image_size=448)
             all_pass &= test_split(ds_c500_val, "Crack500 Val", max_samples=50, expected_shape=None)
         finally:
             if os.path.exists(tmp_path_c500):
                 os.remove(tmp_path_c500)
     elif os.path.exists(crack500_cfg):
         try:
-            ds_c500_train = ConfigurableMedicalDataset(crack500_cfg, split='train', image_size=448)
+            ds_c500_train = ConfigurableCrackDataset(crack500_cfg, split='train', image_size=448)
             all_pass &= test_split(ds_c500_train, "Crack500 Train (Smart Filter)", max_samples=50, expected_shape=(448, 448))
         except Exception as e:
             print(f"ERROR on Crack500 Train: {e}")
             all_pass = False
             
         try:
-            ds_c500_val = ConfigurableMedicalDataset(crack500_cfg, split='val', image_size=448)
+            ds_c500_val = ConfigurableCrackDataset(crack500_cfg, split='val', image_size=448)
             all_pass &= test_split(ds_c500_val, "Crack500 Val", max_samples=len(ds_c500_val), expected_shape=None)
         except Exception as e:
             print(f"NOTE on Crack500 Val: {e}")
@@ -133,8 +131,6 @@ def main():
         tmp_cfg = {
             'model': 'B0',
             'root_dir': deepcrack_root,
-            'crop_mode': 'resize',
-            'smart_filter': False,
             'img_size': 448,
             'mask_suffix': '',
             'train': {'images': 'train_img', 'masks': 'train_lab'},
@@ -146,10 +142,10 @@ def main():
             yaml.dump(tmp_cfg, f)
             
         try:
-            ds_dc_train = ConfigurableMedicalDataset(tmp_path, split='train', image_size=448)
+            ds_dc_train = ConfigurableCrackDataset(tmp_path, split='train', image_size=448)
             all_pass &= test_split(ds_dc_train, "DeepCrack Train (Dynamic Pad-to-Square -> 448x448)", max_samples=50, expected_shape=(448, 448))
             
-            ds_dc_val = ConfigurableMedicalDataset(tmp_path, split='val', image_size=448)
+            ds_dc_val = ConfigurableCrackDataset(tmp_path, split='val', image_size=448)
             all_pass &= test_split(ds_dc_val, "DeepCrack Val/Test (Dynamic Pad-to-Square -> 448x448)", max_samples=50, expected_shape=(448, 448))
         finally:
             if os.path.exists(tmp_path):
