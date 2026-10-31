@@ -1,0 +1,181 @@
+import logging
+import torch.nn as nn
+
+from sage.components.sage_layer import SageLayer, create_sage_layer
+from sage.components.router import create_sage_router
+from sage.components.sa_hub import SAHub
+
+from .wrappers import TupleSafeWrapper
+
+logger = logging.getLogger(__name__)
+
+
+def inject_sage_layers(
+    convnext,
+    transformer_blocks,
+    encoder_channels,
+    stem_channels,
+    transformer_dim,
+    sage_config,
+    p3_mode=None,
+    pe_owner=None,
+):
+    """
+    Inject SAGE wrappers into ConvNeXt stages and Transformer blocks in-place.
+    Returns the assembled expert pool.
+    """
+    logger.info("=" * 80)
+    logger.info("BUILDING HETEROGENEOUS EXPERT POOL (CNN Stages + Transformer Blocks)")
+    logger.info("=" * 80)
+
+    total_experts_to_wrap = len(convnext.stages) + len(transformer_blocks)
+    expert_infos = []
+
+    for i in range(len(convnext.stages)):
+        expert_infos.append({"type": "cnn", "name": f"convnext_stage_{i}", "index": i})
+    for i in range(len(transformer_blocks)):
+        expert_infos.append(
+            {
+                "type": "transformer",
+                "name": f"transformer_block_{i}",
+                "index": len(convnext.stages) + i,
+            }
+        )
+
+    sa_hub = SAHub()
+    sage_layer_config = dict(sage_config) if sage_config else {}
+    router_config = sage_layer_config
+
+    logger.info("\nStep 1a: Wrapping ConvNeXt stages IN-PLACE...")
+    stage_in_channels = [stem_channels] + encoder_channels[:-1]
+
+    for stage_idx in range(len(convnext.stages)):
+        original_stage = convnext.stages[stage_idx]
+
+        router = create_sage_router(
+            in_channels=stage_in_channels[stage_idx],
+            expert_pool_size=total_experts_to_wrap,
+            expert_infos=expert_infos,
+            config=router_config,
+        )
+
+        sage_wrapper = create_sage_layer(
+            main_block=TupleSafeWrapper(original_stage),
+            router=router,
+            sa_hub=sa_hub,
+            config=sage_layer_config,
+            my_index=stage_idx,
+            layer_type="cnn",
+            stage_idx=stage_idx,
+            p3_refinement=None,
+        )
+
+        if pe_owner is not None and stage_idx in (0, 1):
+            sage_wrapper.set_pe_owner(pe_owner)
+
+        convnext.stages[stage_idx] = sage_wrapper
+
+    logger.info("\nStep 1b: Wrapping Transformer blocks IN-PLACE...")
+    for layer_idx in range(len(transformer_blocks)):
+        original_block = transformer_blocks[layer_idx]
+
+        router = create_sage_router(
+            in_channels=transformer_dim,
+            expert_pool_size=total_experts_to_wrap,
+            expert_infos=expert_infos,
+            config=router_config,
+        )
+
+        sage_wrapper = create_sage_layer(
+            main_block=TupleSafeWrapper(original_block),
+            router=router,
+            sa_hub=sa_hub,
+            config=sage_layer_config,
+            my_index=len(convnext.stages) + layer_idx,
+            layer_type="transformer",
+            stage_idx=layer_idx,
+            p3_refinement=None,
+        )
+
+        transformer_blocks[layer_idx] = sage_wrapper
+
+    logger.info("\nStep 2: Building expert pool from wrapped .main_block attributes...")
+    expert_pool = nn.ModuleList()
+
+    for stage_idx, stage_wrapper in enumerate(convnext.stages):
+        expert_mod = stage_wrapper.main_block
+        expert_mod.expert_type = "cnn"
+        expert_mod.expert_name = f"convnext_stage_{stage_idx}"
+        expert_mod.expert_index = stage_idx
+        expert_pool.append(expert_mod)
+    logger.info("  - Added %s CNN main_blocks to pool.", len(convnext.stages))
+
+    for block_idx, block_wrapper in enumerate(transformer_blocks):
+        expert_mod = block_wrapper.main_block
+        expert_mod.expert_type = "transformer"
+        expert_mod.expert_name = f"transformer_block_{block_idx}"
+        expert_mod.expert_index = len(convnext.stages) + block_idx
+        expert_pool.append(expert_mod)
+    logger.info("  - Added %s Transformer main_blocks to pool.", len(transformer_blocks))
+
+    # Link expert_pool into all SageLayer wrappers for forward pass
+    for stage_wrapper in convnext.stages:
+        if isinstance(stage_wrapper, SageLayer):
+            stage_wrapper.expert_pool = expert_pool
+    for block_wrapper in transformer_blocks:
+        if isinstance(block_wrapper, SageLayer):
+            block_wrapper.expert_pool = expert_pool
+
+    logger.info(
+        "\n[OK] Built expert pool with %s experts, linked to all SageLayer instances.",
+        len(expert_pool),
+    )
+
+    logger.info("=" * 80)
+    return expert_pool
+
+
+def pre_populate_sa_hubs(model, encoder_channels, stem_channels, transformer_dim):
+    """
+    Pre-calculates and creates all possible channel/dimension adapters that the SAHubs might need.
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("PRE-POPULATING SAHUB ADAPTERS")
+    logger.info("=" * 80)
+
+    cnn_dims = set(encoder_channels)
+    if stem_channels is not None:
+        cnn_dims.add(stem_channels)
+
+    transformer_dims = {transformer_dim}
+    all_dims = cnn_dims.union(transformer_dims)
+
+    master_adapters = nn.ModuleDict()
+    adapters_created_count = 0
+    for in_dim in all_dims:
+        for out_dim in all_dims:
+            if in_dim == out_dim:
+                continue
+
+            conv_key = f"conv_{in_dim}_to_{out_dim}"
+            if conv_key not in master_adapters:
+                master_adapters[conv_key] = nn.Conv2d(in_dim, out_dim, kernel_size=1)
+                adapters_created_count += 1
+
+            linear_key = f"linear_{in_dim}_to_{out_dim}"
+            if linear_key not in master_adapters:
+                master_adapters[linear_key] = nn.Linear(in_dim, out_dim)
+                adapters_created_count += 1
+
+    logger.info("   - Created a master set of %s potential adapter layers.", adapters_created_count)
+
+    hubs_populated = 0
+    for module in model.modules():
+        if isinstance(module, SageLayer):
+            for key, adapter in master_adapters.items():
+                module.sa_hub.add_adapter(key, adapter)
+            hubs_populated += 1
+
+    logger.info("   - Populated %s SAHub instances with all adapter layers.", hubs_populated)
+    logger.info("=" * 80)
+    return hubs_populated
