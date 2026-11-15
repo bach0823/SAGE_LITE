@@ -411,8 +411,8 @@ def train_one_stage(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Phase 3 Ablation — Variant D or R")
-    parser.add_argument("--variant", required=True, choices=["D", "R"])
+    parser = argparse.ArgumentParser(description="Phase 3 Ablation — Variant D, R, or N")
+    parser.add_argument("--variant", required=True, choices=["D", "R", "N"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--config",
@@ -504,10 +504,20 @@ def main():
         logger.info(f"Variant D injected. DenseAdapter total params: {adapter_params:,}")
         logger.info(f"  Target: {_TOTAL_DENSE_TARGET:,}, Actual: {adapter_params:,}")
         variant_meta["dense_adapter_params"] = adapter_params
-    else:  # R
+    elif variant == "R":  # R
         n_replaced = _inject_variant_R(model)
         logger.info(f"Variant R injected. {n_replaced} RandomFixedRouters (zero trainable params).")
         variant_meta["random_routers_replaced"] = n_replaced
+    else:  # N — Zero Expert Branch
+        n_disabled = 0
+        for m in model.modules():
+            if isinstance(m, SageLayer) and m.fusion_type == "residual":
+                m.residual_scale = 0.0
+                n_disabled += 1
+        logger.info(f"Variant N injected. {n_disabled} SageLayers: residual_scale -> 0.0 (expert branch zeroed).")
+        logger.info("  Architecture identical to canonical; expert pool exists but contributes 0 to output.")
+        variant_meta["n_zeroed_sagelayers"] = n_disabled
+        variant_meta["method"] = "residual_scale=0 on all SageLayers after model creation"
 
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Total model params after injection: {total_params:,}")
