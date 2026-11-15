@@ -281,6 +281,9 @@ def train_one_stage(
         for batch in train_loader:
             imgs  = batch['image'].to(device, non_blocking=True)
             masks = batch['label'].to(device, non_blocking=True)
+            # Dataloader returns (B, H, W); loss expects (B, 1, H, W)
+            if masks.dim() == 3:
+                masks = masks.unsqueeze(1).float()
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
@@ -310,6 +313,8 @@ def train_one_stage(
             for batch in val_loader:
                 imgs  = batch['image'].to(device, non_blocking=True)
                 masks = batch['label'].to(device, non_blocking=True)
+                if masks.dim() == 3:
+                    masks = masks.unsqueeze(1).float()
                 with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                     out = model(imgs)
                     if isinstance(out, tuple):
@@ -461,6 +466,10 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Total model params after injection: {total_params:,}")
     variant_meta["total_params_after_injection"] = total_params
+
+    # Re-move to device: Variant R replaces routers AFTER model.to(device),
+    # so new RandomFixedRouter buffers (total_calls, expert_usage_count) stay on CPU.
+    model = model.to(device)
 
     # Dataloaders
     from torch.utils.data import DataLoader
