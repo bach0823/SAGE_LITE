@@ -51,9 +51,42 @@ from sage.utils.training_utils import setup_logging, set_seed, seed_worker
 
 # Hidden dims khớp với total router+expert_pool params = 6,713,256
 # H = floor(target_per_layer / (2*C + 1))  với target_per_layer = 6713256 / 8
-_DENSE_H: Dict[int, int] = {48: 8651, 96: 4347, 192: 2179}
+# Keyed by OUTPUT channels of main_block (not router.in_channels):
+#   stage0=48, stage1=96, stage2=192, stage3=384, transformer0-3=192
+_DENSE_H: Dict[int, int] = {48: 8651, 96: 4347, 192: 2179, 384: 1091}
 _TOTAL_DENSE_TARGET = 6_713_256
 _RESIDUAL_SCALE = 0.1  # giống canonical fusion_type=residual
+
+
+def _probe_main_block_out_channels(main_block: nn.Module, in_channels: int) -> int:
+    """Probe output channels of main_block via dummy forward (CPU, no grad)."""
+    orig = main_block.training
+    main_block.eval()
+    try:
+        with torch.no_grad():
+            # Try 4D CNN input (B, C, H, W)
+            try:
+                dummy = torch.zeros(1, in_channels, 16, 16)
+                out = main_block(dummy)
+                if isinstance(out, tuple):
+                    out = out[0]
+                if out.dim() == 4:
+                    return out.shape[1]
+                if out.dim() == 3:
+                    return out.shape[-1]
+            except Exception:
+                pass
+            # Try 3D Transformer input (B, L, C)
+            dummy = torch.zeros(1, 196, in_channels)
+            out = main_block(dummy)
+            if isinstance(out, tuple):
+                out = out[0]
+            return out.shape[-1]
+    except Exception:
+        return in_channels
+    finally:
+        if orig:
+            main_block.train()
 
 
 class DenseAdapter(nn.Module):
@@ -96,17 +129,22 @@ class DenseAdapter(nn.Module):
 def _inject_variant_D(model: nn.Module) -> nn.ModuleList:
     """Replace router + expert path with DenseAdapter in every SageLayer.
 
+    Output channels of main_block are probed dynamically (not taken from router.in_channels,
+    which is the INPUT to the stage — different from output for CNN stages that double channels).
+
     Returns ModuleList of adapters (registered on model so optimizer sees them).
     """
     adapters = []
     for name, m in model.named_modules():
         if isinstance(m, SageLayer):
-            in_c = m.router.in_channels
-            if in_c not in _DENSE_H:
+            in_c  = m.router.in_channels
+            out_c = _probe_main_block_out_channels(m.main_block, in_c)
+            if out_c not in _DENSE_H:
                 raise ValueError(
-                    f"SageLayer '{name}' has in_channels={in_c} not in DENSE_H={list(_DENSE_H.keys())}"
+                    f"SageLayer '{name}' main_block output channels={out_c} "
+                    f"not in DENSE_H={list(_DENSE_H.keys())}"
                 )
-            adapter = DenseAdapter(in_c, _DENSE_H[in_c], _RESIDUAL_SCALE)
+            adapter = DenseAdapter(out_c, _DENSE_H[out_c], _RESIDUAL_SCALE)
             m._variant_D_adapter = adapter
             adapters.append(adapter)
 
