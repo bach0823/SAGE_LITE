@@ -58,35 +58,40 @@ _TOTAL_DENSE_TARGET = 6_713_256
 _RESIDUAL_SCALE = 0.1  # giống canonical fusion_type=residual
 
 
-def _probe_main_block_out_channels(main_block: nn.Module, in_channels: int) -> int:
-    """Probe output channels of main_block via dummy forward (CPU, no grad)."""
-    orig = main_block.training
-    main_block.eval()
+def _get_sage_layer_out_channels(layer: SageLayer) -> int:
+    """Determine output channels of main_block deterministically or via probe."""
+    if getattr(layer, "layer_type", None) == "cnn":
+        cnn_out_map = {0: 48, 1: 96, 2: 192, 3: 384}
+        if getattr(layer, "stage_idx", None) in cnn_out_map:
+            return cnn_out_map[layer.stage_idx]
+    elif getattr(layer, "layer_type", None) == "transformer":
+        return 192
+
+    # Dynamic probe with correct device
+    try:
+        dev = next(layer.main_block.parameters()).device
+    except StopIteration:
+        dev = torch.device("cpu")
+
+    orig = layer.main_block.training
+    layer.main_block.eval()
     try:
         with torch.no_grad():
-            # Try 4D CNN input (B, C, H, W)
             try:
-                dummy = torch.zeros(1, in_channels, 16, 16)
-                out = main_block(dummy)
+                dummy = torch.zeros(1, layer.router.in_channels, 16, 16, device=dev)
+                out = layer.main_block(dummy)
                 if isinstance(out, tuple):
                     out = out[0]
-                if out.dim() == 4:
-                    return out.shape[1]
-                if out.dim() == 3:
-                    return out.shape[-1]
+                return out.shape[1] if out.dim() == 4 else out.shape[-1]
             except Exception:
-                pass
-            # Try 3D Transformer input (B, L, C)
-            dummy = torch.zeros(1, 196, in_channels)
-            out = main_block(dummy)
-            if isinstance(out, tuple):
-                out = out[0]
-            return out.shape[-1]
-    except Exception:
-        return in_channels
+                dummy = torch.zeros(1, 196, layer.router.in_channels, device=dev)
+                out = layer.main_block(dummy)
+                if isinstance(out, tuple):
+                    out = out[0]
+                return out.shape[-1]
     finally:
         if orig:
-            main_block.train()
+            layer.main_block.train()
 
 
 class DenseAdapter(nn.Module):
@@ -129,22 +134,25 @@ class DenseAdapter(nn.Module):
 def _inject_variant_D(model: nn.Module) -> nn.ModuleList:
     """Replace router + expert path with DenseAdapter in every SageLayer.
 
-    Output channels of main_block are probed dynamically (not taken from router.in_channels,
-    which is the INPUT to the stage — different from output for CNN stages that double channels).
+    Output channels of main_block are determined deterministically (or probed dynamically)
+    based on the exact stage output dimensions.
 
     Returns ModuleList of adapters (registered on model so optimizer sees them).
     """
     adapters = []
     for name, m in model.named_modules():
         if isinstance(m, SageLayer):
-            in_c  = m.router.in_channels
-            out_c = _probe_main_block_out_channels(m.main_block, in_c)
+            out_c = _get_sage_layer_out_channels(m)
             if out_c not in _DENSE_H:
                 raise ValueError(
                     f"SageLayer '{name}' main_block output channels={out_c} "
                     f"not in DENSE_H={list(_DENSE_H.keys())}"
                 )
-            adapter = DenseAdapter(out_c, _DENSE_H[out_c], _RESIDUAL_SCALE)
+            try:
+                dev = next(m.parameters()).device
+            except StopIteration:
+                dev = torch.device("cpu")
+            adapter = DenseAdapter(out_c, _DENSE_H[out_c], _RESIDUAL_SCALE).to(dev)
             m._variant_D_adapter = adapter
             adapters.append(adapter)
 
