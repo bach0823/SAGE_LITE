@@ -278,9 +278,9 @@ def train_one_stage(
         total_loss = 0.0
         n_batches = 0
 
-        for imgs, masks in train_loader:
-            imgs = imgs.to(device, non_blocking=True)
-            masks = masks.to(device, non_blocking=True)
+        for batch in train_loader:
+            imgs  = batch['image'].to(device, non_blocking=True)
+            masks = batch['label'].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
@@ -307,9 +307,9 @@ def train_one_stage(
         model.eval()
         all_dice = []
         with torch.no_grad():
-            for imgs, masks in val_loader:
-                imgs = imgs.to(device, non_blocking=True)
-                masks = masks.to(device, non_blocking=True)
+            for batch in val_loader:
+                imgs  = batch['image'].to(device, non_blocking=True)
+                masks = batch['label'].to(device, non_blocking=True)
                 with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                     out = model(imgs)
                     if isinstance(out, tuple):
