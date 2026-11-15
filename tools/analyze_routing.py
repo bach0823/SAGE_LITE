@@ -98,16 +98,25 @@ class RouterDataCollector:
         top_k_indices, gating_weights, _ = output
 
         with torch.no_grad():
-            # Step 1: Feature aggregation and adaptation (matching SageRouter.forward)
-            agg = module._aggregate_features_with_adaptation(input_tensor)
+            if hasattr(module, "_aggregate_features_with_adaptation") and hasattr(module, "query_projection"):
+                # Step 1: Feature aggregation and adaptation (matching SageRouter.forward)
+                agg = module._aggregate_features_with_adaptation(input_tensor)
 
-            # Step 2: Shared expert gate g_s [B, 1]
-            g_s = torch.sigmoid(module.shared_expert_gate(agg))
+                # Step 2: Shared expert gate g_s [B, 1]
+                g_s = torch.sigmoid(module.shared_expert_gate(agg))
 
-            # Step 3: Base query-key affinity logits [B, expert_pool_size]
-            query = module.query_projection(agg)
-            base_logits = torch.matmul(query, module.expert_keys.T) / module.temperature
-            sigmoid_affinity = torch.sigmoid(base_logits)
+                # Step 3: Base query-key affinity logits [B, expert_pool_size]
+                query = module.query_projection(agg)
+                base_logits = torch.matmul(query, module.expert_keys.T) / module.temperature
+                sigmoid_affinity = torch.sigmoid(base_logits)
+            else:
+                # RandomFixedRouter / non-parametric router support
+                B = input_tensor.shape[0]
+                dev = input_tensor.device
+                E = getattr(module, "expert_pool_size", 8)
+                g_s = torch.full((B, 1), 0.5, device=dev)
+                base_logits = torch.zeros((B, E), device=dev)
+                sigmoid_affinity = torch.full((B, E), 0.5, device=dev)
 
             B = input_tensor.shape[0]
             top_k_cpu = top_k_indices.cpu().numpy()
@@ -387,6 +396,23 @@ def load_model_from_checkpoint(
     for k, v in state_dict.items():
         clean_k = k[7:] if k.startswith("module.") else k
         cleaned_state_dict[clean_k] = v
+
+    # Auto-detect Variant R (random fixed router)
+    is_variant_r = ("variantR" in checkpoint_path or "variant_R" in checkpoint_path or "phase3_R" in checkpoint_path)
+    if is_variant_r:
+        from scripts.train_phase3_ablation import RandomFixedRouter
+        logger.info("[Variant R Detected] Injecting RandomFixedRouter into model before checkpoint loading...")
+        for name, m in model.named_modules():
+            if isinstance(m, SageLayer):
+                orig = m.router
+                r = RandomFixedRouter(
+                    in_channels=orig.in_channels,
+                    expert_pool_size=orig.expert_pool_size,
+                    top_k=orig.top_k,
+                )
+                r.expert_infos = getattr(orig, "expert_infos", [])
+                m.router = r
+        model = model.to(device)
 
     # Model compatibility audit
     model_state = model.state_dict()
